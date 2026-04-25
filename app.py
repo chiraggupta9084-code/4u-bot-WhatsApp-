@@ -3,7 +3,13 @@ import requests
 import os
 import json
 import re
+import io
+import urllib.parse
 from collections import defaultdict, deque
+
+import qrcode
+
+from catalog import search_catalog, format_item_for_ai
 
 app = Flask(__name__)
 
@@ -13,12 +19,84 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 API_URL = "https://graph.facebook.com/v19.0"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
+GROCERY_UPI_ID = "paytm.s1a4w0w@pty"
+GROCERY_UPI_NAME = "4U Grocery"
+
 FASHION_PHONE_ID = "1045539971979577"
 GROCERY_PHONE_ID = "1120135307844620"
 GROCERY_MANAGER_NUMBER = "919729119167"
 
 GROCERY_FLOW_ID = os.environ.get("GROCERY_FLOW_ID", "")
 FASHION_FLOW_ID = os.environ.get("FASHION_FLOW_ID", "")
+
+# ─── QR + UPI HELPERS ──────────────────────────────
+def upi_link(amount: float) -> str:
+    """Build a tappable upi:// deep link with amount auto-filled."""
+    params = {
+        "pa": GROCERY_UPI_ID,
+        "pn": GROCERY_UPI_NAME,
+        "am": f"{amount:.2f}",
+        "cu": "INR",
+    }
+    return "upi://pay?" + urllib.parse.urlencode(params)
+
+
+def generate_qr_png(amount: float) -> bytes:
+    """Generate a UPI QR PNG with the order amount baked in."""
+    img = qrcode.make(upi_link(amount))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def upload_media(phone_id: str, png_bytes: bytes) -> str | None:
+    """Upload a PNG to WhatsApp Cloud, return media_id."""
+    url = f"{API_URL}/{phone_id}/media"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    files = {
+        "file": ("upi_qr.png", png_bytes, "image/png"),
+        "messaging_product": (None, "whatsapp"),
+        "type": (None, "image/png"),
+    }
+    r = requests.post(url, headers=headers, files=files, timeout=20)
+    print(f"Media upload: {r.status_code} {r.text[:200]}")
+    return r.json().get("id") if r.ok else None
+
+
+def send_image(phone_id: str, to: str, media_id: str, caption: str = "") -> dict:
+    """Send a previously-uploaded image by media_id."""
+    url = f"{API_URL}/{phone_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "image",
+        "image": {"id": media_id, "caption": caption},
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=15)
+    print(f"Image sent to {to}: {r.status_code}")
+    return r.json()
+
+
+def send_payment_qr(phone_id: str, to: str, amount: float):
+    """Send the UPI deep link as text + a fresh QR image with the amount."""
+    link = upi_link(amount)
+    send_message(phone_id, to,
+        f"💳 *Pay ₹{amount:.0f} via UPI*\n\n"
+        f"Tap to pay 👇\n{link}\n\n"
+        f"Or scan the QR below 📷\n"
+        f"UPI ID: `{GROCERY_UPI_ID}`\n"
+        f"Name: {GROCERY_UPI_NAME}"
+    )
+    png = generate_qr_png(amount)
+    media_id = upload_media(phone_id, png)
+    if media_id:
+        send_image(phone_id, to, media_id,
+            caption=f"Scan to pay ₹{amount:.0f} — 4U Grocery")
+
 
 # ─── SEND TEXT MESSAGE ─────────────────────────────
 def send_message(phone_id, to, text):
@@ -119,70 +197,89 @@ def webhook():
     return jsonify({"status": "ok"}), 200
 
 # ─── 4U GROCERY (Gemini AI brain) ──────────────────
-GROCERY_SYSTEM_PROMPT = """You are the friendly WhatsApp order-taking assistant for *4U Grocery*, a small kirana shop in Narnaul, Haryana (Near Hero Honda Chowk).
+GROCERY_SYSTEM_PROMPT = """You are the friendly WhatsApp order-taking assistant for *4U Grocery*, a kirana shop in Narnaul, Haryana (Near Hero Honda Chowk).
 
 # Your job
-Reply to incoming customer WhatsApp messages in warm, natural Hinglish (Hindi + English mix in Roman script). Help them place grocery orders, answer questions, and collect orders for the manager.
+Reply in warm Hinglish (Hindi + English in Roman script). Help customers find items, suggest in-stock alternatives, take orders.
 
 # Business details
 - Store: 4U Grocery, Near Hero Honda Chowk, Narnaul, Haryana
-- Delivery area: ONLY within Narnaul (no outside-Narnaul delivery)
-- Delivery charges: FREE above ₹500, ₹30 below ₹500
-- Payment: Cash on Delivery (COD) or UPI to 9729119167
+- Delivery: ONLY within Narnaul. FREE above ₹500, ₹30 below ₹500
+- Payment: Cash on Delivery (COD) OR UPI (you'll send a payment link with order amount auto-filled)
 - Manager phone: 9729119167
-- Items: sugar, atta, dal, rice, oil, ghee, salt, masala (haldi/mirch/jeera), tea, coffee, biscuits, soap, shampoo, detergent, vegetables, fruits, dairy (milk/paneer/curd/butter), eggs, bread, namkeen, maggi — basically all everyday grocery items.
-- Pricing: DON'T quote made-up prices. Say "manager confirm karenge with exact rate" or ask for brand/quantity.
+
+# How to use the CATALOG
+You will be shown a `# CATALOG MATCHES` section containing items from our actual stock that match the customer's query. Each item shows: NAME | MRP | 4U price | discount % | stock status.
+
+RULES:
+- Quote ONLY prices from the catalog. NEVER invent a price.
+- If item is OUT OF STOCK, suggest similar IN STOCK alternatives from the catalog.
+- If customer asks for a brand we don't carry, suggest the closest brand we DO carry from catalog.
+- When showing prices to customer, format like: `~₹58~ *₹53* (8% OFF) 💰` — strikethrough MRP, bold 4U price, savings %.
+- Multiple sizes? Show them as a short bullet list.
+- Calculate totals from `4U price × quantity`. Be accurate — customer will pay this amount.
 
 # Brand voice
-- Warm, polite, friendly — like a local kirana shop
-- Hinglish (mix Hindi + English), respectful (aap, ji)
-- Use 🙏 😊 🛒 🚚 emojis sparingly
-- Use *bold* (WhatsApp markdown) for prices/totals
-- Keep replies SHORT — 2-5 lines max. Conversational, not formal.
+- Warm, polite — like a friendly local kirana shop
+- Hinglish, respectful (aap, ji)
+- Sparingly use 🙏 😊 🛒 🚚 💰 emojis
+- Replies SHORT (2-6 lines). Conversational, never formal.
 
 # Conversation handling
-- Greeting (hi/hello/namaste) → Welcome warmly, ask what they need
-- Item inquiry → Confirm available, ask quantity/brand if needed
-- Price question → Ask brand/qty, OR say manager will quote shortly
+- Greeting → warm welcome, ask what they need
+- Item inquiry → check catalog, quote with MRP/4U/discount, ask qty
+- Price question → quote from catalog if known
 - Delivery question → "FREE above ₹500, ₹30 below. Same-day in Narnaul."
-- Address only (no items) → Ask what they want to order
-- Items only (no address) → Ask for full name + address in Narnaul
-- Items + address shared → Confirm warmly, set order_complete=true
+- Address only (no items) → ask what to order
+- Items only (no address) → ask for full name + address
+- Items + address shared → confirm warmly, set order_complete=true, calculate total_amount
 
 # Order completion (CRITICAL)
-Set "order_complete": true ONLY when the customer has shared BOTH in this conversation:
-1. Specific items they want (with at least an approximate quantity), AND
-2. A delivery address (any text mentioning a Narnaul location, ward, mohalla, near landmark, pincode 6 digits, etc.)
+Set `order_complete: true` ONLY when ALL three are present in conversation:
+1. Specific item(s) with quantity from the catalog
+2. Delivery address (any Narnaul location reference: ward, mohalla, near landmark, pincode)
+3. (Customer name preferred but optional)
 
-Then write order_summary as clean text for the manager:
-- Customer name (if shared)
-- Items + quantities (one per line with bullet •)
-- Full delivery address
+When order_complete=true:
+- Set `total_amount` = sum of (4U price × quantity) for each item, PLUS ₹30 if subtotal < ₹500 (delivery fee), else 0.
+- Write `order_summary` as a clean WhatsApp message for the manager containing: customer name (if known), items with qty + line totals, subtotal, delivery fee, GRAND TOTAL, full address. Use WhatsApp markdown (*bold*).
 
-Otherwise order_complete=false and order_summary="".
+When order_complete=false: set total_amount=0 and order_summary="".
 
 # What NOT to do
-- Don't quote made-up prices
+- Never quote made-up prices — only catalog prices
 - Don't promise delivery outside Narnaul
-- Don't be pushy or salesy
-- Don't reply in pure English — always mix Hindi
-- Don't write paragraphs — be brief, conversational"""
+- Don't be pushy
+- Don't reply in pure English or pure Hindi — keep Hinglish flavor
+- Don't write paragraphs — be brief"""
 
 # In-memory conversation history per phone number
 # Lost on Render restart — acceptable for low-volume kirana bot
 GROCERY_HISTORY = defaultdict(lambda: deque(maxlen=12))
 
+def _build_catalog_context(query: str) -> str:
+    """Search catalog and format matches as a system context block."""
+    matches = search_catalog(query, limit=20)
+    if not matches:
+        return "# CATALOG MATCHES\n(no matches in catalog for this query — ask customer to clarify the item)"
+    lines = "\n".join(format_item_for_ai(m) for m in matches)
+    return f"# CATALOG MATCHES\n{lines}"
+
+
 def gemini_grocery_reply(from_number, text):
-    """Call Gemini to generate a reply. Returns (reply_text, order_complete, order_summary)."""
+    """Returns (reply_text, order_complete, order_summary, total_amount)."""
     if not GEMINI_API_KEY:
-        return ("Namaste! 🙏 Welcome to 4U Grocery. Bataiye kya chahiye?\n📞 9729119167", False, "")
+        return ("Namaste! 🙏 Welcome to 4U Grocery. Bataiye kya chahiye?\n📞 9729119167", False, "", 0.0)
 
     history = GROCERY_HISTORY[from_number]
     history.append({"role": "user", "parts": [{"text": text}]})
 
+    catalog_block = _build_catalog_context(text)
+    system_text = GROCERY_SYSTEM_PROMPT + "\n\n" + catalog_block
+
     payload = {
         "contents": list(history),
-        "systemInstruction": {"parts": [{"text": GROCERY_SYSTEM_PROMPT}]},
+        "systemInstruction": {"parts": [{"text": system_text}]},
         "generationConfig": {
             "responseMimeType": "application/json",
             "responseSchema": {
@@ -191,11 +288,12 @@ def gemini_grocery_reply(from_number, text):
                     "reply": {"type": "string"},
                     "order_complete": {"type": "boolean"},
                     "order_summary": {"type": "string"},
+                    "total_amount": {"type": "number"},
                 },
-                "required": ["reply", "order_complete", "order_summary"],
+                "required": ["reply", "order_complete", "order_summary", "total_amount"],
             },
-            "temperature": 0.6,
-            "maxOutputTokens": 800,
+            "temperature": 0.5,
+            "maxOutputTokens": 1000,
         },
     }
 
@@ -203,7 +301,7 @@ def gemini_grocery_reply(from_number, text):
         r = requests.post(
             f"{GEMINI_URL}?key={GEMINI_API_KEY}",
             json=payload,
-            timeout=20,
+            timeout=25,
         )
         r.raise_for_status()
         data = r.json()
@@ -212,26 +310,32 @@ def gemini_grocery_reply(from_number, text):
         reply = parsed.get("reply", "").strip()
         order_complete = bool(parsed.get("order_complete", False))
         order_summary = (parsed.get("order_summary") or "").strip()
+        total_amount = float(parsed.get("total_amount") or 0)
 
-        # Save assistant turn
         history.append({"role": "model", "parts": [{"text": reply}]})
 
-        return (reply, order_complete, order_summary)
+        return (reply, order_complete, order_summary, total_amount)
     except Exception as e:
         print(f"Gemini API error: {e}")
-        return ("Namaste! 🙏 Thoda technical issue hai, ek minute me reply karte hain. Aap apna order share kar dijiye 😊\n📞 9729119167", False, "")
+        return ("Namaste! 🙏 Thoda technical issue hai, ek minute me reply karte hain 😊\n📞 9729119167", False, "", 0.0)
 
 
 def handle_grocery(phone_id, from_number, text):
-    reply, order_complete, order_summary = gemini_grocery_reply(from_number, text)
+    reply, order_complete, order_summary, total_amount = gemini_grocery_reply(from_number, text)
     send_message(phone_id, from_number, reply)
 
     if order_complete and order_summary:
+        # Customer payment QR (only if amount known)
+        if total_amount > 0:
+            send_payment_qr(phone_id, from_number, total_amount)
+
+        # Manager alert
         send_message(phone_id, GROCERY_MANAGER_NUMBER,
             "🛒 *NEW GROCERY ORDER!*\n\n"
-            f"📱 From: +{from_number}\n\n"
+            f"📱 From: +{from_number}\n"
+            f"💰 Total: ₹{total_amount:.0f}\n\n"
             f"{order_summary}\n\n"
-            "➡️ Confirm karo with total amount + dispatch."
+            "➡️ Confirm + dispatch."
         )
 
 # ─── 4U FASHION ────────────────────────────────────

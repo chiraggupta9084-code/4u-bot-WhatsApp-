@@ -114,3 +114,17 @@ def format_item_for_ai(item: dict) -> str:
         f"- {item['name']} | MRP ₹{item['mrp']:.0f} | 4U ₹{item['price']:.0f} "
         f"({discount}% off) | {stock_label} ({item['stock']})"
     )
+
+
+def top_offers(limit: int = 3, min_discount: int = 15):
+    """Return the top in-stock items by discount % — for upsell push."""
+    scored = []
+    for item in CATALOG:
+        if item["stock"] <= 0 or item["mrp"] <= 0:
+            continue
+        discount = (item["mrp"] - item["price"]) / item["mrp"] * 100
+        if discount < min_discount:
+            continue
+        scored.append((discount, item))
+    scored.sort(key=lambda x: -x[0])
+    return [item for _, item in scored[:limit]]

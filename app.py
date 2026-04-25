@@ -9,7 +9,9 @@ from collections import defaultdict, deque
 
 import qrcode
 
-from catalog import search_catalog, format_item_for_ai
+import random
+from datetime import datetime
+from catalog import search_catalog, format_item_for_ai, top_offers
 
 app = Flask(__name__)
 
@@ -197,61 +199,100 @@ def webhook():
     return jsonify({"status": "ok"}), 200
 
 # ─── 4U GROCERY (Gemini AI brain) ──────────────────
-GROCERY_SYSTEM_PROMPT = """You are the friendly WhatsApp order-taking assistant for *4U Grocery*, a kirana shop in Narnaul, Haryana (Near Hero Honda Chowk).
+GROCERY_SYSTEM_PROMPT = """You are the WhatsApp order-taking assistant for *4U Grocery*, a kirana shop in Narnaul, Haryana. Your tone is professional, polite, and Hinglish (Hindi + English in Roman script) — like a real shop owner serving customers, not a casual friend.
 
-# Your job
-Reply in warm Hinglish (Hindi + English in Roman script). Help customers find items, suggest in-stock alternatives, take orders.
+# Business rules
+- Store hours: 8 AM to 10 PM
+- Delivery area: ONLY within Narnaul
+- Delivery time: 30-40 minutes
+- Help line: 9729119167
 
-# Business details
-- Store: 4U Grocery, Near Hero Honda Chowk, Narnaul, Haryana
-- Delivery: ONLY within Narnaul. FREE above ₹500, ₹30 below ₹500
-- Payment: Cash on Delivery (COD) OR UPI (you'll send a payment link with order amount auto-filled)
-- Manager phone: 9729119167
+## Delivery charges (TIERED)
+- Subtotal under ₹200 → ₹40 delivery
+- Subtotal ₹200 to ₹399 → ₹30 delivery
+- Subtotal ₹400 to ₹499 → ₹20 delivery
+- Subtotal ₹500 or above → FREE delivery 🎉
+
+## Payment options
+- *Home Delivery*: **UPI ONLY** (no COD). Customer pays first via UPI link/QR you send.
+- *Self Pickup*: **UPI or Cash** at counter.
+
+# Greeting (use exactly this format on first message)
+🛒 *Welcome to 4U Grocery*
+
+Aapki seva me hum 8 AM se 10 PM tak available hain.
+
+⏱️ *Quick delivery* — 30-40 min in Narnaul
+💳 UPI / COD accepted
+
+Bataiye, kya order karna hai?
 
 # How to use the CATALOG
-You will be shown a `# CATALOG MATCHES` section containing items from our actual stock that match the customer's query. Each item shows: NAME | MRP | 4U price | discount % | stock status.
+You will see a `# CATALOG MATCHES` section with items matching the customer's query. Each line shows: NAME | MRP | 4U price | discount % | stock status.
 
 RULES:
 - Quote ONLY prices from the catalog. NEVER invent a price.
-- If item is OUT OF STOCK, suggest similar IN STOCK alternatives from the catalog.
-- If customer asks for a brand we don't carry, suggest the closest brand we DO carry from catalog.
-- When showing prices to customer, format like: `~₹58~ *₹53* (8% OFF) 💰` — strikethrough MRP, bold 4U price, savings %.
-- Multiple sizes? Show them as a short bullet list.
-- Calculate totals from `4U price × quantity`. Be accurate — customer will pay this amount.
+- If item is OUT OF STOCK, suggest similar IN-STOCK alternatives from catalog.
+- If customer asks for a brand we don't carry, suggest the closest brand we DO carry.
+- Format prices as: `~₹58~ *₹53* (8% OFF)` — strikethrough MRP, bold 4U price, savings %.
+- Multiple sizes? Bullet list.
 
-# Brand voice
-- Warm, polite — like a friendly local kirana shop
-- Hinglish, respectful (aap, ji)
-- Sparingly use 🙏 😊 🛒 🚚 💰 emojis
-- Replies SHORT (2-6 lines). Conversational, never formal.
+# How to use TOP OFFERS
+You will see a `# TOP OFFERS TODAY` section with our 3 best in-stock deals (highest discount %).
+- Mid-conversation, after the customer adds their first item, mention 1-2 of these as "Aaj ke top deals" — once per conversation, never repeat. This drives upsell.
+- DON'T push offers if customer is in a hurry / clearly wants to finalize.
 
-# Conversation handling
-- Greeting → warm welcome, ask what they need
-- Item inquiry → check catalog, quote with MRP/4U/discount, ask qty
-- Price question → quote from catalog if known
-- Delivery question → "FREE above ₹500, ₹30 below. Same-day in Narnaul."
-- Address only (no items) → ask what to order
-- Items only (no address) → ask for full name + address
-- Items + address shared → confirm warmly, set order_complete=true, calculate total_amount
+# Strategic upsell (CRITICAL)
+After every cart update, calculate subtotal. Check if customer is close to next delivery tier:
+- Subtotal ₹100-199 → "Add ₹X more → ₹30 delivery (save ₹10)"
+- Subtotal ₹300-399 → "Add ₹X more → ₹20 delivery (save ₹10)"
+- Subtotal ₹400-499 → "Add ₹X more → FREE delivery (save ₹20)" + suggest 1-2 specific items from catalog matching that price range
+- Subtotal ≥ ₹500 → celebrate "FREE delivery unlocked! 🎉"
+
+Be subtle and helpful, not pushy. One-line nudge max.
+
+# Conversation flow
+1. Greeting → warm welcome
+2. Customer asks item → quote from catalog with MRP/4U/% off
+3. Customer adds to cart → confirm + show running cart + delivery tier nudge if close
+4. Customer says "bas" / "ho gaya" / "done" / "thik hai" → ask Delivery vs Pickup
+5. Choice made → ask: ASAP or scheduled (for delivery: schedule = "kal X time" or specific time today)
+6. Get name + address (delivery) OR confirm pickup time (pickup)
+7. Set order_complete=true with full details
+
+DON'T proactively push customer to "finalize". Let them say when they're done.
 
 # Order completion (CRITICAL)
-Set `order_complete: true` ONLY when ALL three are present in conversation:
-1. Specific item(s) with quantity from the catalog
-2. Delivery address (any Narnaul location reference: ward, mohalla, near landmark, pincode)
-3. (Customer name preferred but optional)
+Set `order_complete: true` ONLY when ALL these are present:
+1. At least one item with quantity from catalog
+2. Delivery: name + Narnaul address  |  Pickup: pickup time confirmed
+3. Customer indicated they're done adding items
 
-When order_complete=true:
-- Set `total_amount` = sum of (4U price × quantity) for each item, PLUS ₹30 if subtotal < ₹500 (delivery fee), else 0.
-- Write `order_summary` as a clean WhatsApp message for the manager containing: customer name (if known), items with qty + line totals, subtotal, delivery fee, GRAND TOTAL, full address. Use WhatsApp markdown (*bold*).
+When order_complete=true, return:
+- `total_amount` = items subtotal + delivery_charge (per tier above; 0 for pickup)
+- `delivery_or_pickup` = "delivery" or "pickup"
+- `schedule_text` = "ASAP" or specific time like "Tomorrow 10 AM"
+- `order_summary` = clean text for manager: items with line totals, subtotal, delivery charge, GRAND TOTAL, customer name + phone + address (or pickup time)
 
-When order_complete=false: set total_amount=0 and order_summary="".
+When order_complete=false: total_amount=0, order_summary="", delivery_or_pickup="", schedule_text="".
 
-# What NOT to do
-- Never quote made-up prices — only catalog prices
-- Don't promise delivery outside Narnaul
-- Don't be pushy
-- Don't reply in pure English or pure Hindi — keep Hinglish flavor
-- Don't write paragraphs — be brief"""
+# Edge cases
+- Outside Narnaul address → "Sorry, abhi sirf Narnaul me deliver karte hain. Pickup option available hai if you can come to store."
+- Item not in catalog → "Ye item abhi available nahi hai. Help: 9729119167"
+- Asks for credit/udhaar → "Sorry udhaar nahi karte. UPI ya cash payment hi accept karte hain."
+- Random chit-chat → polite redirect: "Aapko kya order karna hai? 😊"
+- Wrong amount paid → "Amount ₹X expected tha. Please ₹Y more bhejiye to complete order."
+
+# What NEVER to do
+- NEVER invent prices — only catalog prices
+- NEVER mention store address ("Near Hero Honda Chowk") in any message — just say "Narnaul"
+- NEVER say "track ya cancel" — instead show "📞 Help: 9729119167"
+- NEVER offer COD for home delivery — UPI only for delivery
+- NEVER say "yaar/tu/dost" — professional, use "aap/ji"
+- NEVER write long paragraphs — concise, max 6-7 lines
+- NEVER ask "ya order finalize karein?" — let customer decide when they're done
+- NEVER promise delivery outside Narnaul
+- NEVER push offers more than once per conversation"""
 
 # In-memory conversation history per phone number
 # Lost on Render restart — acceptable for low-volume kirana bot
@@ -261,15 +302,37 @@ def _build_catalog_context(query: str) -> str:
     """Search catalog and format matches as a system context block."""
     matches = search_catalog(query, limit=20)
     if not matches:
-        return "# CATALOG MATCHES\n(no matches in catalog for this query — ask customer to clarify the item)"
-    lines = "\n".join(format_item_for_ai(m) for m in matches)
-    return f"# CATALOG MATCHES\n{lines}"
+        catalog_block = "# CATALOG MATCHES\n(no matches in catalog for this query — ask customer to clarify the item, or say item not available)"
+    else:
+        lines = "\n".join(format_item_for_ai(m) for m in matches)
+        catalog_block = f"# CATALOG MATCHES\n{lines}"
+
+    offers = top_offers(limit=3)
+    if offers:
+        offer_lines = "\n".join(format_item_for_ai(o) for o in offers)
+        offers_block = f"\n\n# TOP OFFERS TODAY\n{offer_lines}"
+    else:
+        offers_block = ""
+
+    return catalog_block + offers_block
+
+
+def generate_order_id() -> str:
+    """Simple order ID like 4UG-1234."""
+    return f"4UG-{random.randint(1000, 9999)}"
 
 
 def gemini_grocery_reply(from_number, text):
-    """Returns (reply_text, order_complete, order_summary, total_amount)."""
+    """Returns dict with reply + order details."""
     if not GEMINI_API_KEY:
-        return ("Namaste! 🙏 Welcome to 4U Grocery. Bataiye kya chahiye?\n📞 9729119167", False, "", 0.0)
+        return {
+            "reply": "🛒 *Welcome to 4U Grocery*\n\nBataiye kya order karna hai?\n📞 9729119167",
+            "order_complete": False,
+            "order_summary": "",
+            "total_amount": 0.0,
+            "delivery_or_pickup": "",
+            "schedule_text": "",
+        }
 
     history = GROCERY_HISTORY[from_number]
     history.append({"role": "user", "parts": [{"text": text}]})
@@ -289,54 +352,88 @@ def gemini_grocery_reply(from_number, text):
                     "order_complete": {"type": "boolean"},
                     "order_summary": {"type": "string"},
                     "total_amount": {"type": "number"},
+                    "delivery_or_pickup": {"type": "string"},
+                    "schedule_text": {"type": "string"},
                 },
-                "required": ["reply", "order_complete", "order_summary", "total_amount"],
+                "required": ["reply", "order_complete", "order_summary", "total_amount", "delivery_or_pickup", "schedule_text"],
             },
             "temperature": 0.5,
-            "maxOutputTokens": 1000,
+            "maxOutputTokens": 1200,
         },
     }
 
     try:
-        r = requests.post(
-            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
-            json=payload,
-            timeout=25,
-        )
+        r = requests.post(f"{GEMINI_URL}?key={GEMINI_API_KEY}", json=payload, timeout=25)
         r.raise_for_status()
         data = r.json()
         text_out = data["candidates"][0]["content"]["parts"][0]["text"]
         parsed = json.loads(text_out)
-        reply = parsed.get("reply", "").strip()
-        order_complete = bool(parsed.get("order_complete", False))
-        order_summary = (parsed.get("order_summary") or "").strip()
-        total_amount = float(parsed.get("total_amount") or 0)
-
-        history.append({"role": "model", "parts": [{"text": reply}]})
-
-        return (reply, order_complete, order_summary, total_amount)
+        result = {
+            "reply": parsed.get("reply", "").strip(),
+            "order_complete": bool(parsed.get("order_complete", False)),
+            "order_summary": (parsed.get("order_summary") or "").strip(),
+            "total_amount": float(parsed.get("total_amount") or 0),
+            "delivery_or_pickup": (parsed.get("delivery_or_pickup") or "").strip().lower(),
+            "schedule_text": (parsed.get("schedule_text") or "").strip(),
+        }
+        history.append({"role": "model", "parts": [{"text": result["reply"]}]})
+        return result
     except Exception as e:
         print(f"Gemini API error: {e}")
-        return ("Namaste! 🙏 Thoda technical issue hai, ek minute me reply karte hain 😊\n📞 9729119167", False, "", 0.0)
+        return {
+            "reply": "🛒 Thoda technical issue hai, ek minute me reply karte hain.\n📞 9729119167",
+            "order_complete": False,
+            "order_summary": "",
+            "total_amount": 0.0,
+            "delivery_or_pickup": "",
+            "schedule_text": "",
+        }
 
 
 def handle_grocery(phone_id, from_number, text):
-    reply, order_complete, order_summary, total_amount = gemini_grocery_reply(from_number, text)
-    send_message(phone_id, from_number, reply)
+    result = gemini_grocery_reply(from_number, text)
+    send_message(phone_id, from_number, result["reply"])
 
-    if order_complete and order_summary:
-        # Customer payment QR (only if amount known)
-        if total_amount > 0:
-            send_payment_qr(phone_id, from_number, total_amount)
+    if not result["order_complete"] or not result["order_summary"]:
+        return
 
-        # Manager alert
-        send_message(phone_id, GROCERY_MANAGER_NUMBER,
-            "🛒 *NEW GROCERY ORDER!*\n\n"
-            f"📱 From: +{from_number}\n"
-            f"💰 Total: ₹{total_amount:.0f}\n\n"
-            f"{order_summary}\n\n"
-            "➡️ Confirm + dispatch."
+    order_id = generate_order_id()
+    is_pickup = result["delivery_or_pickup"] == "pickup"
+    schedule = result["schedule_text"] or "ASAP"
+
+    # ── Customer-facing follow-up ──
+    if is_pickup:
+        send_message(phone_id, from_number,
+            f"📋 Order ID: *{order_id}*\n"
+            f"🏪 Self-Pickup — {schedule}\n"
+            f"💳 Payment: UPI ya Cash, store par dono accept hain\n\n"
+            f"📞 Help: 9729119167"
         )
+        # Optional QR for pickup (customer can pre-pay)
+        if result["total_amount"] > 0:
+            send_payment_qr(phone_id, from_number, result["total_amount"])
+    else:
+        # Home delivery → UPI only, must pay first
+        send_message(phone_id, from_number,
+            f"📋 Order ID: *{order_id}*\n"
+            f"🚚 Home Delivery — {schedule}\n"
+            f"💳 Payment: *UPI only* (COD not available for delivery)\n\n"
+            f"Pay neeche QR/link se 👇"
+        )
+        if result["total_amount"] > 0:
+            send_payment_qr(phone_id, from_number, result["total_amount"])
+
+    # ── Manager alert ──
+    mode_label = "🏪 PICKUP" if is_pickup else "🚚 DELIVERY"
+    send_message(phone_id, GROCERY_MANAGER_NUMBER,
+        f"🛒 *NEW ORDER — {order_id}*\n\n"
+        f"💰 Total: ₹{result['total_amount']:.0f}\n"
+        f"{mode_label} — {schedule}\n"
+        f"📱 Customer: +{from_number}\n\n"
+        f"{result['order_summary']}\n\n"
+        f"⏰ {datetime.now().strftime('%d %b, %I:%M %p')}\n"
+        f"➡️ {'Pack for pickup' if is_pickup else 'Pack + dispatch'}"
+    )
 
 # ─── 4U FASHION ────────────────────────────────────
 def handle_fashion(phone_id, from_number):

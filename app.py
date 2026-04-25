@@ -7,7 +7,11 @@ import io
 import urllib.parse
 from collections import defaultdict, deque
 
+import hmac
+import hashlib
+
 import qrcode
+import razorpay
 
 import random
 from datetime import datetime
@@ -24,12 +28,59 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5
 GROCERY_UPI_ID = "paytm.s1a4w0w@pty"
 GROCERY_UPI_NAME = "4U Grocery"
 
+RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
+RAZORPAY_WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
+
+razorpay_client = (
+    razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+    if RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET
+    else None
+)
+
+# Track pending orders so we can match payments back to them.
+# Lost on Render restart — acceptable for low-volume kirana bot.
+# Maps: razorpay_payment_link_id -> {phone_id, customer_phone, order_id, amount, summary}
+PENDING_ORDERS = {}
+
 FASHION_PHONE_ID = "1045539971979577"
 GROCERY_PHONE_ID = "1120135307844620"
 GROCERY_MANAGER_NUMBER = "919729119167"
 
 GROCERY_FLOW_ID = os.environ.get("GROCERY_FLOW_ID", "")
 FASHION_FLOW_ID = os.environ.get("FASHION_FLOW_ID", "")
+
+# ─── RAZORPAY PAYMENT LINK ─────────────────────────
+def create_razorpay_link(order_id: str, amount: float, customer_phone: str, customer_name: str = ""):
+    """Create a Razorpay Payment Link. Returns (short_url, link_id) or (None, None) on failure."""
+    if not razorpay_client:
+        return (None, None)
+    try:
+        # contact must be 10-digit Indian number; strip leading 91 if present
+        contact = customer_phone[-10:] if len(customer_phone) >= 10 else customer_phone
+        link = razorpay_client.payment_link.create({
+            "amount": int(round(amount * 100)),  # paise
+            "currency": "INR",
+            "accept_partial": False,
+            "description": f"4U Grocery Order {order_id}",
+            "customer": {
+                "name": customer_name or "Customer",
+                "contact": "+91" + contact,
+            },
+            "notify": {"sms": False, "email": False},  # we send via WhatsApp ourselves
+            "reminder_enable": False,
+            "notes": {
+                "order_id": order_id,
+                "customer_wa": customer_phone,
+            },
+            "callback_url": "https://fouru-whatsapp-bot.onrender.com/",
+            "callback_method": "get",
+        })
+        return (link.get("short_url"), link.get("id"))
+    except Exception as e:
+        print(f"Razorpay create error: {e}")
+        return (None, None)
+
 
 # ─── QR + UPI HELPERS ──────────────────────────────
 def upi_link(amount: float) -> str:
@@ -400,8 +451,26 @@ def handle_grocery(phone_id, from_number, text):
     order_id = generate_order_id()
     is_pickup = result["delivery_or_pickup"] == "pickup"
     schedule = result["schedule_text"] or "ASAP"
+    amount = result["total_amount"]
 
-    # ── Customer-facing follow-up ──
+    # ── Try Razorpay payment link first (for delivery, where UPI is mandatory) ──
+    rzp_url, rzp_link_id = (None, None)
+    if amount > 0 and razorpay_client:
+        rzp_url, rzp_link_id = create_razorpay_link(order_id, amount, from_number)
+
+    # Stash for webhook lookup
+    if rzp_link_id:
+        PENDING_ORDERS[rzp_link_id] = {
+            "phone_id": phone_id,
+            "customer_phone": from_number,
+            "order_id": order_id,
+            "amount": amount,
+            "summary": result["order_summary"],
+            "is_pickup": is_pickup,
+            "schedule": schedule,
+        }
+
+    # ── Customer-facing payment instructions ──
     if is_pickup:
         send_message(phone_id, from_number,
             f"📋 Order ID: *{order_id}*\n"
@@ -409,30 +478,50 @@ def handle_grocery(phone_id, from_number, text):
             f"💳 Payment: UPI ya Cash, store par dono accept hain\n\n"
             f"📞 Help: 9729119167"
         )
-        # Optional QR for pickup (customer can pre-pay)
-        if result["total_amount"] > 0:
-            send_payment_qr(phone_id, from_number, result["total_amount"])
+        # Optional pre-pay link for pickup
+        if rzp_url:
+            send_message(phone_id, from_number,
+                f"💳 Online pay karna hai? (optional)\n"
+                f"Tap 👉 {rzp_url}\n"
+                f"Amount: ₹{amount:.0f}"
+            )
+        elif amount > 0:
+            send_payment_qr(phone_id, from_number, amount)
     else:
-        # Home delivery → UPI only, must pay first
-        send_message(phone_id, from_number,
-            f"📋 Order ID: *{order_id}*\n"
-            f"🚚 Home Delivery — {schedule}\n"
-            f"💳 Payment: *UPI only* (COD not available for delivery)\n\n"
-            f"Pay neeche QR/link se 👇"
-        )
-        if result["total_amount"] > 0:
-            send_payment_qr(phone_id, from_number, result["total_amount"])
+        # Home delivery → UPI mandatory
+        if rzp_url:
+            send_message(phone_id, from_number,
+                f"📋 Order ID: *{order_id}*\n"
+                f"🚚 Home Delivery — {schedule}\n"
+                f"💰 Total: *₹{amount:.0f}*\n\n"
+                f"💳 *Pay UPI to confirm order* (delivery ke liye UPI mandatory hai)\n\n"
+                f"Tap to pay 👉 {rzp_url}\n\n"
+                f"Payment ke baad order automatically confirm ho jayega ✅\n\n"
+                f"📞 Help: 9729119167"
+            )
+        else:
+            # Razorpay unavailable → fall back to UPI deep link + QR
+            send_message(phone_id, from_number,
+                f"📋 Order ID: *{order_id}*\n"
+                f"🚚 Home Delivery — {schedule}\n"
+                f"💰 Total: *₹{amount:.0f}*\n\n"
+                f"💳 *Pay UPI to confirm* — neeche QR scan karein\n\n"
+                f"📞 Help: 9729119167"
+            )
+            if amount > 0:
+                send_payment_qr(phone_id, from_number, amount)
 
     # ── Manager alert ──
     mode_label = "🏪 PICKUP" if is_pickup else "🚚 DELIVERY"
+    payment_status = "⏳ AWAITING PAYMENT" if not is_pickup else "(Payment at counter or pre-paid)"
     send_message(phone_id, GROCERY_MANAGER_NUMBER,
         f"🛒 *NEW ORDER — {order_id}*\n\n"
-        f"💰 Total: ₹{result['total_amount']:.0f}\n"
+        f"💰 Total: ₹{amount:.0f} — {payment_status}\n"
         f"{mode_label} — {schedule}\n"
         f"📱 Customer: +{from_number}\n\n"
         f"{result['order_summary']}\n\n"
         f"⏰ {datetime.now().strftime('%d %b, %I:%M %p')}\n"
-        f"➡️ {'Pack for pickup' if is_pickup else 'Pack + dispatch'}"
+        f"➡️ {'Pack for pickup' if is_pickup else 'Wait for payment confirm, then dispatch'}"
     )
 
 # ─── 4U FASHION ────────────────────────────────────
@@ -491,6 +580,79 @@ def handle_flow_response(phone_id, from_number, interactive):
             "✅ Order received! Our team will contact you shortly.\n"
             "For queries: 9729119167"
         )
+
+# ─── RAZORPAY WEBHOOK ──────────────────────────────
+@app.route("/razorpay-webhook", methods=["POST"])
+def razorpay_webhook():
+    raw_body = request.get_data()
+    sig = request.headers.get("X-Razorpay-Signature", "")
+
+    # Verify signature
+    if RAZORPAY_WEBHOOK_SECRET:
+        expected = hmac.new(
+            RAZORPAY_WEBHOOK_SECRET.encode(),
+            raw_body,
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            print(f"Razorpay webhook bad signature")
+            return jsonify({"error": "bad signature"}), 400
+
+    payload = request.get_json(silent=True) or {}
+    event = payload.get("event", "")
+    print(f"Razorpay webhook: {event}")
+
+    # We care about successful payments
+    if event in ("payment_link.paid", "payment.captured", "order.paid"):
+        # Try to find the matching pending order
+        link_id = None
+        amount_paise = 0
+        payment_id = ""
+        try:
+            entity = payload.get("payload", {})
+            if "payment_link" in entity:
+                link_id = entity["payment_link"]["entity"]["id"]
+                amount_paise = entity["payment_link"]["entity"].get("amount_paid", 0)
+            if "payment" in entity:
+                payment_id = entity["payment"]["entity"].get("id", "")
+                amount_paise = amount_paise or entity["payment"]["entity"].get("amount", 0)
+                # Try to recover link_id from payment notes
+                notes = entity["payment"]["entity"].get("notes") or {}
+                if not link_id and "order_id" in notes:
+                    # Search PENDING_ORDERS by order_id
+                    for lid, order in PENDING_ORDERS.items():
+                        if order["order_id"] == notes["order_id"]:
+                            link_id = lid
+                            break
+        except Exception as e:
+            print(f"Razorpay webhook parse error: {e}")
+
+        order = PENDING_ORDERS.pop(link_id, None) if link_id else None
+        if order:
+            amount_rupees = amount_paise / 100
+            # Confirm to customer
+            send_message(order["phone_id"], order["customer_phone"],
+                f"✅ *Payment Confirmed* — ₹{amount_rupees:.0f} received 🎉\n"
+                f"📋 Order *{order['order_id']}*\n\n"
+                f"Aapka order pack ho raha hai 🛒\n"
+                f"Delivery 30-40 min me 🚚\n\n"
+                f"📞 Help: 9729119167\n\n"
+                f"Dhanyavaad! 🙏"
+            )
+            # Notify manager
+            send_message(order["phone_id"], GROCERY_MANAGER_NUMBER,
+                f"💰 *PAYMENT RECEIVED — {order['order_id']}*\n\n"
+                f"✅ ₹{amount_rupees:.0f} confirmed via UPI\n"
+                f"🆔 Razorpay Payment: {payment_id}\n"
+                f"📱 Customer: +{order['customer_phone']}\n\n"
+                f"{order['summary']}\n\n"
+                f"➡️ DISPATCH NOW 🚚"
+            )
+        else:
+            print(f"Razorpay webhook: no matching order for link_id={link_id}")
+
+    return jsonify({"status": "ok"}), 200
+
 
 # ─── HEALTH CHECK ──────────────────────────────────
 @app.route("/", methods=["GET"])

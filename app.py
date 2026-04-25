@@ -3,12 +3,15 @@ import requests
 import os
 import json
 import re
+from collections import defaultdict, deque
 
 app = Flask(__name__)
 
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "4ubots_verify_token")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 API_URL = "https://graph.facebook.com/v19.0"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 FASHION_PHONE_ID = "1045539971979577"
 GROCERY_PHONE_ID = "1120135307844620"
@@ -115,133 +118,121 @@ def webhook():
 
     return jsonify({"status": "ok"}), 200
 
-# ─── 4U GROCERY ────────────────────────────────────
-GROCERY_ITEMS = [
-    "sugar", "cheeni", "shakkar", "milk", "doodh", "rice", "chawal",
-    "atta", "flour", "maida", "dal", "moong", "chana", "rajma",
-    "oil", "tel", "refined", "ghee", "salt", "namak", "tea", "chai",
-    "coffee", "maggi", "biscuit", "parle", "soap", "shampoo", "detergent",
-    "surf", "tide", "masala", "haldi", "mirch", "jeera", "dhaniya",
-    "besan", "sooji", "rava", "poha", "namkeen", "bread", "egg", "anda",
-    "butter", "paneer", "curd", "dahi", "onion", "pyaaz", "potato", "aalu",
-    "tomato", "tamatar", "vegetable", "sabzi", "fruit", "phal", "namkeen",
-]
+# ─── 4U GROCERY (Gemini AI brain) ──────────────────
+GROCERY_SYSTEM_PROMPT = """You are the friendly WhatsApp order-taking assistant for *4U Grocery*, a small kirana shop in Narnaul, Haryana (Near Hero Honda Chowk).
 
-ADDRESS_SIGNALS = [
-    "house", "h.no", "street", "gali", "mohalla", "near", "behind",
-    "opposite", "ward", "sector", "colony", "narnaul", "haryana",
-    "village", "vpo", "tehsil",
-]
+# Your job
+Reply to incoming customer WhatsApp messages in warm, natural Hinglish (Hindi + English mix in Roman script). Help them place grocery orders, answer questions, and collect orders for the manager.
+
+# Business details
+- Store: 4U Grocery, Near Hero Honda Chowk, Narnaul, Haryana
+- Delivery area: ONLY within Narnaul (no outside-Narnaul delivery)
+- Delivery charges: FREE above ₹500, ₹30 below ₹500
+- Payment: Cash on Delivery (COD) or UPI to 9729119167
+- Manager phone: 9729119167
+- Items: sugar, atta, dal, rice, oil, ghee, salt, masala (haldi/mirch/jeera), tea, coffee, biscuits, soap, shampoo, detergent, vegetables, fruits, dairy (milk/paneer/curd/butter), eggs, bread, namkeen, maggi — basically all everyday grocery items.
+- Pricing: DON'T quote made-up prices. Say "manager confirm karenge with exact rate" or ask for brand/quantity.
+
+# Brand voice
+- Warm, polite, friendly — like a local kirana shop
+- Hinglish (mix Hindi + English), respectful (aap, ji)
+- Use 🙏 😊 🛒 🚚 emojis sparingly
+- Use *bold* (WhatsApp markdown) for prices/totals
+- Keep replies SHORT — 2-5 lines max. Conversational, not formal.
+
+# Conversation handling
+- Greeting (hi/hello/namaste) → Welcome warmly, ask what they need
+- Item inquiry → Confirm available, ask quantity/brand if needed
+- Price question → Ask brand/qty, OR say manager will quote shortly
+- Delivery question → "FREE above ₹500, ₹30 below. Same-day in Narnaul."
+- Address only (no items) → Ask what they want to order
+- Items only (no address) → Ask for full name + address in Narnaul
+- Items + address shared → Confirm warmly, set order_complete=true
+
+# Order completion (CRITICAL)
+Set "order_complete": true ONLY when the customer has shared BOTH in this conversation:
+1. Specific items they want (with at least an approximate quantity), AND
+2. A delivery address (any text mentioning a Narnaul location, ward, mohalla, near landmark, pincode 6 digits, etc.)
+
+Then write order_summary as clean text for the manager:
+- Customer name (if shared)
+- Items + quantities (one per line with bullet •)
+- Full delivery address
+
+Otherwise order_complete=false and order_summary="".
+
+# What NOT to do
+- Don't quote made-up prices
+- Don't promise delivery outside Narnaul
+- Don't be pushy or salesy
+- Don't reply in pure English — always mix Hindi
+- Don't write paragraphs — be brief, conversational"""
+
+# In-memory conversation history per phone number
+# Lost on Render restart — acceptable for low-volume kirana bot
+GROCERY_HISTORY = defaultdict(lambda: deque(maxlen=12))
+
+def gemini_grocery_reply(from_number, text):
+    """Call Gemini to generate a reply. Returns (reply_text, order_complete, order_summary)."""
+    if not GEMINI_API_KEY:
+        return ("Namaste! 🙏 Welcome to 4U Grocery. Bataiye kya chahiye?\n📞 9729119167", False, "")
+
+    history = GROCERY_HISTORY[from_number]
+    history.append({"role": "user", "parts": [{"text": text}]})
+
+    payload = {
+        "contents": list(history),
+        "systemInstruction": {"parts": [{"text": GROCERY_SYSTEM_PROMPT}]},
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "object",
+                "properties": {
+                    "reply": {"type": "string"},
+                    "order_complete": {"type": "boolean"},
+                    "order_summary": {"type": "string"},
+                },
+                "required": ["reply", "order_complete", "order_summary"],
+            },
+            "temperature": 0.6,
+            "maxOutputTokens": 800,
+        },
+    }
+
+    try:
+        r = requests.post(
+            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+            json=payload,
+            timeout=20,
+        )
+        r.raise_for_status()
+        data = r.json()
+        text_out = data["candidates"][0]["content"]["parts"][0]["text"]
+        parsed = json.loads(text_out)
+        reply = parsed.get("reply", "").strip()
+        order_complete = bool(parsed.get("order_complete", False))
+        order_summary = (parsed.get("order_summary") or "").strip()
+
+        # Save assistant turn
+        history.append({"role": "model", "parts": [{"text": reply}]})
+
+        return (reply, order_complete, order_summary)
+    except Exception as e:
+        print(f"Gemini API error: {e}")
+        return ("Namaste! 🙏 Thoda technical issue hai, ek minute me reply karte hain. Aap apna order share kar dijiye 😊\n📞 9729119167", False, "")
+
 
 def handle_grocery(phone_id, from_number, text):
-    msg = (text or "").lower().strip()
+    reply, order_complete, order_summary = gemini_grocery_reply(from_number, text)
+    send_message(phone_id, from_number, reply)
 
-    # Greeting → send Flow if configured, else welcome text
-    if msg in ("hi", "hello", "hey", "start") or any(
-        w in msg for w in ["namaste", "namaskar", "ram ram", "good morning", "good evening"]
-    ):
-        if GROCERY_FLOW_ID:
-            send_flow(
-                phone_id, from_number, GROCERY_FLOW_ID,
-                "Order Now 🛒", "4U Grocery 🛒",
-                "Fresh groceries delivered in Narnaul!\nTap below to place your order."
-            )
-            return
-        send_message(phone_id, from_number,
-            "Namaste! 🙏 Welcome to *4U Grocery* 🛒\n\n"
-            "Fresh groceries delivered in Narnaul!\n"
-            "📍 Near Hero Honda Chowk, Narnaul\n\n"
-            "Bataiye kya chahiye? Sugar, atta, dal, oil, masala — sab available hai 😊\n\n"
-            "📞 9729119167"
-        )
-        return
-
-    # Location
-    if any(w in msg for w in ["where are you", "kahan ho", "location", "shop", "store kahan", "address kya"]):
-        send_message(phone_id, from_number,
-            "📍 *4U Mall* — Near Hero Honda Chowk, Narnaul, Haryana\n\n"
-            "🚚 Home delivery only within Narnaul\n"
-            "📞 9729119167"
-        )
-        return
-
-    # Delivery
-    if any(w in msg for w in ["delivery", "deliver", "kab aayega", "shipping", "courier"]):
-        send_message(phone_id, from_number,
-            "🚚 *Delivery in Narnaul:*\n"
-            "✅ FREE above ₹500\n"
-            "📦 ₹30 below ₹500\n"
-            "⏱️ Same-day delivery in most areas\n\n"
-            "Apna address aur items batao! 😊"
-        )
-        return
-
-    # Payment
-    if any(w in msg for w in ["payment", "cod", "upi", "online pay", "cash"]):
-        send_message(phone_id, from_number,
-            "💵 *Payment Options:*\n"
-            "💰 Cash on Delivery (COD)\n"
-            "📲 UPI: 9729119167\n\n"
-            "Order karne ke liye items aur address bhejiye! 😊"
-        )
-        return
-
-    # Price inquiry (generic, no item)
-    found_items = [i for i in GROCERY_ITEMS if i in msg]
-    has_qty = bool(re.search(
-        r"\d+\s*(kg|gm|g|litre|liter|ltr|l|ml|packet|pkt|piece|pc|dozen)\b", msg
-    ))
-    if any(w in msg for w in ["price", "rate", "kitna", "how much", "kitne ka"]) and not found_items:
-        send_message(phone_id, from_number,
-            "Aap kaunsa item lena chahte ho? 😊\n"
-            "Item ka naam aur quantity batao, hum exact price bata denge!\n\n"
-            "Example: Sugar 2kg, Atta 5kg, Dal 1kg"
-        )
-        return
-
-    # Address detection
-    has_address = (
-        any(s in msg for s in ADDRESS_SIGNALS)
-        or bool(re.search(r"\b\d{6}\b", msg))   # pincode
-    )
-
-    # Full order: items/qty + address → confirm + alert manager
-    if has_address and (found_items or has_qty):
-        send_message(phone_id, from_number,
-            "✅ *Order Received!* 🛒\n\n"
-            "Aapka order humein mil gaya hai. Manager 5-10 min me confirm karenge with total amount.\n\n"
-            "🚚 Delivery: FREE above ₹500, ₹30 below\n"
-            "💵 Payment: COD / UPI 9729119167\n\n"
-            "Dhanyavaad! 🙏"
-        )
+    if order_complete and order_summary:
         send_message(phone_id, GROCERY_MANAGER_NUMBER,
             "🛒 *NEW GROCERY ORDER!*\n\n"
-            f"📱 From: +{from_number}\n"
-            f"📝 Message:\n{text}\n\n"
+            f"📱 From: +{from_number}\n\n"
+            f"{order_summary}\n\n"
             "➡️ Confirm karo with total amount + dispatch."
         )
-        return
-
-    # Items mentioned without address
-    if found_items or has_qty:
-        items_str = ", ".join(found_items) if found_items else "aapke items"
-        send_message(phone_id, from_number,
-            f"Ji haan! 😊 Ye available hai — *{items_str}*.\n\n"
-            "Order confirm karne ke liye please bhejiye:\n"
-            "1️⃣ Poora *naam*\n"
-            "2️⃣ *Address* (Narnaul me)\n"
-            "3️⃣ Items + quantity (e.g. Sugar 2kg, Atta 5kg)\n\n"
-            "🚚 Free delivery above ₹500 | ₹30 below"
-        )
-        return
-
-    # Default fallback
-    send_message(phone_id, from_number,
-        "Namaste! 🙏 *4U Grocery* — Narnaul\n\n"
-        "Bataiye aapko kya chahiye? Sugar, atta, dal, oil, masala — sab available hai 😊\n\n"
-        "📍 Near Hero Honda Chowk, Narnaul\n"
-        "📞 9729119167"
-    )
 
 # ─── 4U FASHION ────────────────────────────────────
 def handle_fashion(phone_id, from_number):

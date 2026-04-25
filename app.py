@@ -11,7 +11,6 @@ import hmac
 import hashlib
 
 import qrcode
-import razorpay
 
 import random
 from datetime import datetime
@@ -32,11 +31,8 @@ RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
 RAZORPAY_WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
 
-razorpay_client = (
-    razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
-    if RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET
-    else None
-)
+RAZORPAY_API = "https://api.razorpay.com/v1"
+razorpay_enabled = bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
 
 # Track pending orders so we can match payments back to them.
 # Lost on Render restart — acceptable for low-volume kirana bot.
@@ -52,14 +48,13 @@ FASHION_FLOW_ID = os.environ.get("FASHION_FLOW_ID", "")
 
 # ─── RAZORPAY PAYMENT LINK ─────────────────────────
 def create_razorpay_link(order_id: str, amount: float, customer_phone: str, customer_name: str = ""):
-    """Create a Razorpay Payment Link. Returns (short_url, link_id) or (None, None) on failure."""
-    if not razorpay_client:
+    """Create a Razorpay Payment Link via raw HTTP. Returns (short_url, link_id) or (None, None)."""
+    if not razorpay_enabled:
         return (None, None)
     try:
-        # contact must be 10-digit Indian number; strip leading 91 if present
         contact = customer_phone[-10:] if len(customer_phone) >= 10 else customer_phone
-        link = razorpay_client.payment_link.create({
-            "amount": int(round(amount * 100)),  # paise
+        payload = {
+            "amount": int(round(amount * 100)),
             "currency": "INR",
             "accept_partial": False,
             "description": f"4U Grocery Order {order_id}",
@@ -67,7 +62,7 @@ def create_razorpay_link(order_id: str, amount: float, customer_phone: str, cust
                 "name": customer_name or "Customer",
                 "contact": "+91" + contact,
             },
-            "notify": {"sms": False, "email": False},  # we send via WhatsApp ourselves
+            "notify": {"sms": False, "email": False},
             "reminder_enable": False,
             "notes": {
                 "order_id": order_id,
@@ -75,8 +70,18 @@ def create_razorpay_link(order_id: str, amount: float, customer_phone: str, cust
             },
             "callback_url": "https://fouru-whatsapp-bot.onrender.com/",
             "callback_method": "get",
-        })
-        return (link.get("short_url"), link.get("id"))
+        }
+        r = requests.post(
+            f"{RAZORPAY_API}/payment_links",
+            auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET),
+            json=payload,
+            timeout=15,
+        )
+        if not r.ok:
+            print(f"Razorpay create failed: {r.status_code} {r.text[:200]}")
+            return (None, None)
+        data = r.json()
+        return (data.get("short_url"), data.get("id"))
     except Exception as e:
         print(f"Razorpay create error: {e}")
         return (None, None)
@@ -455,7 +460,7 @@ def handle_grocery(phone_id, from_number, text):
 
     # ── Try Razorpay payment link first (for delivery, where UPI is mandatory) ──
     rzp_url, rzp_link_id = (None, None)
-    if amount > 0 and razorpay_client:
+    if amount > 0 and razorpay_enabled:
         rzp_url, rzp_link_id = create_razorpay_link(order_id, amount, from_number)
 
     # Stash for webhook lookup

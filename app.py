@@ -11,17 +11,27 @@ from collections import defaultdict, deque
 
 
 def retry(times: int = 3, base_delay: float = 0.8):
-    """Tiny retry helper with exponential backoff. Returns last exception's value via fn re-raise."""
+    """Retry helper with exponential backoff.
+
+    Skips retries on 4xx client errors (especially 429 rate limit) — retrying
+    those would waste API quota and worsen the issue. Only retries on transient
+    network/5xx server errors.
+    """
     def deco(fn):
         def wrapper(*args, **kwargs):
             last_exc = None
             for i in range(times):
                 try:
                     return fn(*args, **kwargs)
+                except requests.HTTPError as e:
+                    # Don't retry 4xx — bad request or rate limit. Just surface.
+                    if e.response is not None and 400 <= e.response.status_code < 500:
+                        raise
+                    last_exc = e
                 except Exception as e:
                     last_exc = e
-                    if i < times - 1:
-                        time.sleep(base_delay * (2 ** i))
+                if i < times - 1:
+                    time.sleep(base_delay * (2 ** i))
             raise last_exc
         return wrapper
     return deco
@@ -42,7 +52,8 @@ VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "4ubots_verify_token")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 API_URL = "https://graph.facebook.com/v19.0"
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+# gemini-2.0-flash has 1500 RPD on free tier (vs 250 on 2.5-flash) — far safer for production
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 GROCERY_UPI_ID = "paytm.s1a4w0w@pty"
 GROCERY_UPI_NAME = "4U Grocery"
@@ -660,10 +671,18 @@ def gemini_grocery_reply(from_number, text):
         history.append({"role": "model", "parts": [{"text": result["reply"]}]})
         return result
     except Exception as e:
-        print(f"Gemini gave up after retries: {e}")
-        # Soft, non-technical fallback
+        print(f"Gemini gave up: {e}")
+        # Pop the user message we appended so it doesn't poison history with no
+        # assistant reply alongside it (would skew next turn's understanding).
+        if history and history[-1].get("role") == "user":
+            history.pop()
+        # Conversation-preserving fallback — does NOT reset context with a fresh greeting.
         return {
-            "reply": "Namaste! 🙏 Bataiye kya order karna hai aaj? Sugar, atta, dal, oil, dairy — sab available hai 😊\n📞 9729119167",
+            "reply": (
+                "Ek minute ji 🙏 — system thoda busy hai, "
+                "abhi aapke order pe wapas aate hain.\n\n"
+                "Agar urgent ho to: 📞 9729119167"
+            ),
             "order_complete": False,
             "order_summary": "",
             "total_amount": 0.0,

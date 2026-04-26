@@ -271,7 +271,11 @@ def webhook():
                         elif phone_id == GROCERY_PHONE_ID:
                             handle_grocery(phone_id, from_number, text_body)
 
-                    # Image messages are now ignored — only Razorpay link confirms payment
+                    # Customer sent an image (likely payment screenshot)
+                    if msg_type == "image" and phone_id == GROCERY_PHONE_ID:
+                        media_id = message.get("image", {}).get("id", "")
+                        if media_id:
+                            handle_payment_screenshot(phone_id, from_number, media_id)
 
     except Exception as e:
         print(f"Error: {e}")
@@ -294,9 +298,12 @@ GROCERY_SYSTEM_PROMPT = """You are the WhatsApp order-taking assistant for *4U G
 - Subtotal ₹500 or above → FREE delivery 🎉
 
 ## Payment options
-- ALL orders: **UPI via Razorpay link only**. No Cash on Delivery, no manual UPI screenshots.
-- Order is NOT confirmed to manager until payment is received via Razorpay (auto webhook).
-- Customer pays by tapping the Razorpay link — opens checkout page with UPI/cards/wallets.
+- ALL orders: **Razorpay only**. No Cash on Delivery.
+- Razorpay supports: UPI (PhonePe/GPay/Paytm/etc.), Credit/Debit Cards, Wallets, NetBanking
+- Order is NOT confirmed to manager until payment is verified.
+- Customer can either:
+  1) Tap Razorpay link → auto-confirm via webhook (preferred)
+  2) Pay UPI from their own app → send payment screenshot in chat → bot OCR validates → confirm
 
 # Greeting (use exactly this format on first message)
 🛒 *Welcome to 4U Grocery*
@@ -686,12 +693,15 @@ def handle_grocery(phone_id, from_number, text):
             f"📋 Order ID: *{order_id}*\n"
             f"{mode_emoji} {mode_label} — {schedule}\n"
             f"💰 Total: *₹{amount:.0f}*\n\n"
-            f"💳 Tap to pay via Razorpay 👇\n{rzp_url}\n\n"
-            f"Order automatically confirm ho jayega payment ke baad ✅\n\n"
+            f"💳 *Pay via Razorpay* 👇\n{rzp_url}\n\n"
+            f"_Accepted: UPI (PhonePe/GPay/Paytm), Cards, Wallets, NetBanking_\n\n"
+            f"✅ *Order auto-confirm ho jayega payment ke baad*\n\n"
+            f"Ya phir apne UPI app se pay karke *payment screenshot* yahan bhejiye — "
+            f"hum verify karke confirm kar denge.\n\n"
             f"📞 Help: 9729119167"
         )
     else:
-        # Razorpay temporarily down — apologise, ask to retry
+        # Razorpay temporarily down
         send_message(phone_id, from_number,
             f"📋 Order ID: *{order_id}*\n"
             f"{mode_emoji} {mode_label} — {schedule}\n"

@@ -63,7 +63,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 API_URL = "https://graph.facebook.com/v19.0"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 GROCERY_UPI_ID = "paytm.s1a4w0w@pty"
 GROCERY_UPI_NAME = "4U Grocery"

@@ -271,11 +271,7 @@ def webhook():
                         elif phone_id == GROCERY_PHONE_ID:
                             handle_grocery(phone_id, from_number, text_body)
 
-                    # Customer sent an image (likely payment screenshot)
-                    if msg_type == "image" and phone_id == GROCERY_PHONE_ID:
-                        media_id = message.get("image", {}).get("id", "")
-                        if media_id:
-                            handle_payment_screenshot(phone_id, from_number, media_id)
+                    # Image messages are now ignored — only Razorpay link confirms payment
 
     except Exception as e:
         print(f"Error: {e}")
@@ -298,8 +294,9 @@ GROCERY_SYSTEM_PROMPT = """You are the WhatsApp order-taking assistant for *4U G
 - Subtotal ₹500 or above → FREE delivery 🎉
 
 ## Payment options
-- *Home Delivery*: **UPI ONLY** (no COD). Customer MUST pay first via UPI link/QR you send. Order is NOT confirmed to manager until payment received. Customer can either tap the Razorpay link (auto-confirm) or pay via UPI app and send the payment screenshot to verify.
-- *Self Pickup*: **UPI or Cash** at counter. Manager is notified immediately.
+- ALL orders: **UPI via Razorpay link only**. No Cash on Delivery, no manual UPI screenshots.
+- Order is NOT confirmed to manager until payment is received via Razorpay (auto webhook).
+- Customer pays by tapping the Razorpay link — opens checkout page with UPI/cards/wallets.
 
 # Greeting (use exactly this format on first message)
 🛒 *Welcome to 4U Grocery*
@@ -307,7 +304,7 @@ GROCERY_SYSTEM_PROMPT = """You are the WhatsApp order-taking assistant for *4U G
 Aapki seva me hum 8 AM se 10 PM tak available hain.
 
 ⏱️ *Quick delivery* — 30-40 min in Narnaul
-💳 UPI / COD accepted
+💳 Secure UPI payment via Razorpay
 
 Bataiye, kya order karna hai?
 
@@ -680,62 +677,30 @@ def handle_grocery(phone_id, from_number, text):
         PENDING_ORDERS[rzp_link_id] = pending
     PENDING_BY_CUSTOMER[from_number] = pending
 
-    # ── Customer-facing payment instructions ──
-    if is_pickup:
+    # ── Customer-facing payment instructions (Razorpay-only flow) ──
+    mode_label = "Self-Pickup" if is_pickup else "Home Delivery"
+    mode_emoji = "🏪" if is_pickup else "🚚"
+
+    if rzp_url:
         send_message(phone_id, from_number,
             f"📋 Order ID: *{order_id}*\n"
-            f"🏪 Self-Pickup — {schedule}\n"
-            f"💳 Payment: UPI ya Cash, store par dono accept hain\n\n"
+            f"{mode_emoji} {mode_label} — {schedule}\n"
+            f"💰 Total: *₹{amount:.0f}*\n\n"
+            f"💳 Tap to pay via Razorpay 👇\n{rzp_url}\n\n"
+            f"Order automatically confirm ho jayega payment ke baad ✅\n\n"
             f"📞 Help: 9729119167"
         )
-        # Optional pre-pay link for pickup
-        if rzp_url:
-            send_message(phone_id, from_number,
-                f"💳 Online pay karna hai? (optional)\n"
-                f"Tap 👉 {rzp_url}\n"
-                f"Amount: ₹{amount:.0f}"
-            )
-        elif amount > 0:
-            send_payment_qr(phone_id, from_number, amount)
     else:
-        # Home delivery → UPI mandatory; either Razorpay link OR pay & send screenshot
-        if rzp_url:
-            send_message(phone_id, from_number,
-                f"📋 Order ID: *{order_id}*\n"
-                f"🚚 Home Delivery — {schedule}\n"
-                f"💰 Total: *₹{amount:.0f}*\n\n"
-                f"💳 *Payment options* (choose one):\n\n"
-                f"*1)* Tap Razorpay link 👉 {rzp_url}\n   (auto-confirm, easiest)\n\n"
-                f"*2)* Pay UPI from QR below + send payment *screenshot* in this chat\n\n"
-                f"Order tab confirm hoga jab payment received 🟢\n"
-                f"📞 Help: 9729119167"
-            )
-            if amount > 0:
-                send_payment_qr(phone_id, from_number, amount)
-        else:
-            send_message(phone_id, from_number,
-                f"📋 Order ID: *{order_id}*\n"
-                f"🚚 Home Delivery — {schedule}\n"
-                f"💰 Total: *₹{amount:.0f}*\n\n"
-                f"💳 Pay UPI from QR below + send payment *screenshot* in this chat to confirm\n\n"
-                f"📞 Help: 9729119167"
-            )
-            if amount > 0:
-                send_payment_qr(phone_id, from_number, amount)
-
-    # ── PICKUP exception: alert manager immediately (no online payment required) ──
-    if is_pickup:
-        send_message(phone_id, GROCERY_MANAGER_NUMBER,
-            f"🛒 *NEW PICKUP ORDER — {order_id}*\n\n"
-            f"💰 Total: ₹{amount:.0f} — Cash or UPI at counter\n"
-            f"🏪 PICKUP — {schedule}\n"
-            f"📱 Customer: +{from_number}\n\n"
-            f"{result['order_summary']}\n\n"
-            f"⏰ {datetime.now().strftime('%d %b, %I:%M %p')}\n"
-            f"➡️ Pack for pickup"
+        # Razorpay temporarily down — apologise, ask to retry
+        send_message(phone_id, from_number,
+            f"📋 Order ID: *{order_id}*\n"
+            f"{mode_emoji} {mode_label} — {schedule}\n"
+            f"💰 Total: *₹{amount:.0f}*\n\n"
+            f"⚠️ Payment system thoda busy hai, ek minute me dobara try kariye.\n\n"
+            f"📞 Help: 9729119167"
         )
-    # For DELIVERY: NO manager alert yet. Wait for payment confirm via Razorpay webhook
-    # OR customer payment screenshot. Then notify_paid_order() fires the alert.
+    # No manager alert yet for either mode — wait for Razorpay webhook to fire
+    # notify_paid_order() once payment received.
 
 # ─── 4U FASHION ────────────────────────────────────
 def handle_fashion(phone_id, from_number):

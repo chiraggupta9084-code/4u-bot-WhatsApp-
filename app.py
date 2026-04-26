@@ -4,6 +4,7 @@ import os
 import json
 import re
 import io
+import base64
 import urllib.parse
 from collections import defaultdict, deque
 
@@ -36,8 +37,10 @@ razorpay_enabled = bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
 
 # Track pending orders so we can match payments back to them.
 # Lost on Render restart — acceptable for low-volume kirana bot.
-# Maps: razorpay_payment_link_id -> {phone_id, customer_phone, order_id, amount, summary}
+# Maps: razorpay_payment_link_id -> order dict
 PENDING_ORDERS = {}
+# Maps: customer_phone -> latest pending order (for screenshot-based confirmation)
+PENDING_BY_CUSTOMER = {}
 
 FASHION_PHONE_ID = "1045539971979577"
 GROCERY_PHONE_ID = "1120135307844620"
@@ -249,6 +252,12 @@ def webhook():
                         elif phone_id == GROCERY_PHONE_ID:
                             handle_grocery(phone_id, from_number, text_body)
 
+                    # Customer sent an image (likely payment screenshot)
+                    if msg_type == "image" and phone_id == GROCERY_PHONE_ID:
+                        media_id = message.get("image", {}).get("id", "")
+                        if media_id:
+                            handle_payment_screenshot(phone_id, from_number, media_id)
+
     except Exception as e:
         print(f"Error: {e}")
 
@@ -270,8 +279,8 @@ GROCERY_SYSTEM_PROMPT = """You are the WhatsApp order-taking assistant for *4U G
 - Subtotal ₹500 or above → FREE delivery 🎉
 
 ## Payment options
-- *Home Delivery*: **UPI ONLY** (no COD). Customer pays first via UPI link/QR you send.
-- *Self Pickup*: **UPI or Cash** at counter.
+- *Home Delivery*: **UPI ONLY** (no COD). Customer MUST pay first via UPI link/QR you send. Order is NOT confirmed to manager until payment received. Customer can either tap the Razorpay link (auto-confirm) or pay via UPI app and send the payment screenshot to verify.
+- *Self Pickup*: **UPI or Cash** at counter. Manager is notified immediately.
 
 # Greeting (use exactly this format on first message)
 🛒 *Welcome to 4U Grocery*
@@ -378,6 +387,144 @@ def generate_order_id() -> str:
     return f"4UG-{random.randint(1000, 9999)}"
 
 
+# ─── PAYMENT SCREENSHOT OCR ────────────────────────
+def fetch_whatsapp_media(media_id: str) -> bytes | None:
+    """Download an image from WhatsApp Cloud by media_id."""
+    try:
+        # Step 1: get the URL
+        meta = requests.get(
+            f"{API_URL}/{media_id}",
+            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
+            timeout=15,
+        ).json()
+        url = meta.get("url")
+        if not url:
+            print(f"Media {media_id}: no URL returned")
+            return None
+        # Step 2: download the bytes
+        r = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
+            timeout=20,
+        )
+        return r.content if r.ok else None
+    except Exception as e:
+        print(f"fetch_whatsapp_media error: {e}")
+        return None
+
+
+def ocr_payment_screenshot(image_bytes: bytes) -> dict:
+    """Use Gemini Vision to read a UPI payment screenshot. Returns dict with amount/utr/payee_id/looks_valid."""
+    if not GEMINI_API_KEY:
+        return {"looks_valid": False}
+    img_b64 = base64.b64encode(image_bytes).decode()
+    prompt = (
+        "This is a screenshot of a UPI payment from an Indian payment app "
+        "(Paytm/GPay/PhonePe/BHIM/etc.). Extract the payment details and "
+        "return JSON only. If the screenshot is NOT a payment success page, "
+        "set looks_valid=false."
+    )
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inlineData": {"mimeType": "image/jpeg", "data": img_b64}},
+            ]
+        }],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "object",
+                "properties": {
+                    "amount": {"type": "number"},
+                    "utr": {"type": "string"},
+                    "payee_name": {"type": "string"},
+                    "payee_upi_id": {"type": "string"},
+                    "status_text": {"type": "string"},
+                    "looks_valid": {"type": "boolean"},
+                },
+                "required": ["amount", "utr", "payee_name", "payee_upi_id", "status_text", "looks_valid"],
+            },
+            "temperature": 0.1,
+        },
+    }
+    try:
+        r = requests.post(f"{GEMINI_URL}?key={GEMINI_API_KEY}", json=payload, timeout=25)
+        r.raise_for_status()
+        data = r.json()
+        text_out = data["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(text_out)
+    except Exception as e:
+        print(f"OCR error: {e}")
+        return {"looks_valid": False}
+
+
+def handle_payment_screenshot(phone_id: str, from_number: str, media_id: str):
+    """Customer sent an image. Try to read it as payment proof."""
+    pending = PENDING_BY_CUSTOMER.get(from_number)
+    if not pending:
+        send_message(phone_id, from_number,
+            "Photo mil gayi 📸 — lekin abhi koi pending order nahi hai aapka.\n"
+            "Pehle order place karein, payment ke baad screenshot bhejna 😊\n\n"
+            "📞 Help: 9729119167"
+        )
+        return
+
+    img = fetch_whatsapp_media(media_id)
+    if not img:
+        send_message(phone_id, from_number, "Photo download nahi ho payi, please dobara bhejein 🙏")
+        return
+
+    parsed = ocr_payment_screenshot(img)
+    if not parsed.get("looks_valid"):
+        send_message(phone_id, from_number,
+            "Ye payment screenshot clear nahi dikh raha 🙏\n"
+            "Please clean payment success screenshot bhejein\n"
+            "(amount + UTR/transaction ID dikhe)"
+        )
+        return
+
+    paid = float(parsed.get("amount") or 0)
+    expected = pending["amount"]
+    utr = parsed.get("utr") or "—"
+    payee = parsed.get("payee_upi_id") or parsed.get("payee_name") or "—"
+
+    if paid + 1 < expected:  # ₹1 tolerance
+        send_message(phone_id, from_number,
+            f"Aapne ₹{paid:.0f} bheja hai, lekin order ka total ₹{expected:.0f} hai.\n"
+            f"Please ₹{expected - paid:.0f} aur bhejein, phir confirm hoga 🙏"
+        )
+        return
+
+    # Looks good — confirm
+    notify_paid_order(pending, paid_amount=paid, utr=utr, payee=payee, source="Screenshot")
+    PENDING_BY_CUSTOMER.pop(from_number, None)
+
+
+def notify_paid_order(pending: dict, paid_amount: float, utr: str, payee: str, source: str):
+    """Send paid-confirmation to customer + manager. Used by Razorpay webhook AND screenshot OCR."""
+    # Customer
+    send_message(pending["phone_id"], pending["customer_phone"],
+        f"✅ *Payment Confirmed* — ₹{paid_amount:.0f} received 🎉\n"
+        f"📋 Order *{pending['order_id']}*\n\n"
+        f"Aapka order pack ho raha hai 🛒\n"
+        f"Delivery 30-40 min me 🚚\n\n"
+        f"📞 Help: 9729119167\n\nDhanyavaad! 🙏"
+    )
+    # Manager — first time they see this order
+    send_message(pending["phone_id"], GROCERY_MANAGER_NUMBER,
+        f"💰 *PAID ORDER — {pending['order_id']}*\n\n"
+        f"✅ ₹{paid_amount:.0f} received via UPI ({source})\n"
+        f"🆔 Ref: {utr}\n"
+        f"💳 Payee: {payee}\n"
+        f"🚚 {pending['schedule']}\n"
+        f"📱 Customer: +{pending['customer_phone']}\n\n"
+        f"{pending['summary']}\n\n"
+        f"⏰ {datetime.now().strftime('%d %b, %I:%M %p')}\n"
+        f"➡️ DISPATCH NOW 🚚"
+    )
+
+
 def gemini_grocery_reply(from_number, text):
     """Returns dict with reply + order details."""
     if not GEMINI_API_KEY:
@@ -463,17 +610,19 @@ def handle_grocery(phone_id, from_number, text):
     if amount > 0 and razorpay_enabled:
         rzp_url, rzp_link_id = create_razorpay_link(order_id, amount, from_number)
 
-    # Stash for webhook lookup
+    # Stash for webhook + screenshot OCR lookup
+    pending = {
+        "phone_id": phone_id,
+        "customer_phone": from_number,
+        "order_id": order_id,
+        "amount": amount,
+        "summary": result["order_summary"],
+        "is_pickup": is_pickup,
+        "schedule": schedule,
+    }
     if rzp_link_id:
-        PENDING_ORDERS[rzp_link_id] = {
-            "phone_id": phone_id,
-            "customer_phone": from_number,
-            "order_id": order_id,
-            "amount": amount,
-            "summary": result["order_summary"],
-            "is_pickup": is_pickup,
-            "schedule": schedule,
-        }
+        PENDING_ORDERS[rzp_link_id] = pending
+    PENDING_BY_CUSTOMER[from_number] = pending
 
     # ── Customer-facing payment instructions ──
     if is_pickup:
@@ -493,41 +642,44 @@ def handle_grocery(phone_id, from_number, text):
         elif amount > 0:
             send_payment_qr(phone_id, from_number, amount)
     else:
-        # Home delivery → UPI mandatory
+        # Home delivery → UPI mandatory; either Razorpay link OR pay & send screenshot
         if rzp_url:
             send_message(phone_id, from_number,
                 f"📋 Order ID: *{order_id}*\n"
                 f"🚚 Home Delivery — {schedule}\n"
                 f"💰 Total: *₹{amount:.0f}*\n\n"
-                f"💳 *Pay UPI to confirm order* (delivery ke liye UPI mandatory hai)\n\n"
-                f"Tap to pay 👉 {rzp_url}\n\n"
-                f"Payment ke baad order automatically confirm ho jayega ✅\n\n"
+                f"💳 *Payment options* (choose one):\n\n"
+                f"*1)* Tap Razorpay link 👉 {rzp_url}\n   (auto-confirm, easiest)\n\n"
+                f"*2)* Pay UPI from QR below + send payment *screenshot* in this chat\n\n"
+                f"Order tab confirm hoga jab payment received 🟢\n"
                 f"📞 Help: 9729119167"
             )
+            if amount > 0:
+                send_payment_qr(phone_id, from_number, amount)
         else:
-            # Razorpay unavailable → fall back to UPI deep link + QR
             send_message(phone_id, from_number,
                 f"📋 Order ID: *{order_id}*\n"
                 f"🚚 Home Delivery — {schedule}\n"
                 f"💰 Total: *₹{amount:.0f}*\n\n"
-                f"💳 *Pay UPI to confirm* — neeche QR scan karein\n\n"
+                f"💳 Pay UPI from QR below + send payment *screenshot* in this chat to confirm\n\n"
                 f"📞 Help: 9729119167"
             )
             if amount > 0:
                 send_payment_qr(phone_id, from_number, amount)
 
-    # ── Manager alert ──
-    mode_label = "🏪 PICKUP" if is_pickup else "🚚 DELIVERY"
-    payment_status = "⏳ AWAITING PAYMENT" if not is_pickup else "(Payment at counter or pre-paid)"
-    send_message(phone_id, GROCERY_MANAGER_NUMBER,
-        f"🛒 *NEW ORDER — {order_id}*\n\n"
-        f"💰 Total: ₹{amount:.0f} — {payment_status}\n"
-        f"{mode_label} — {schedule}\n"
-        f"📱 Customer: +{from_number}\n\n"
-        f"{result['order_summary']}\n\n"
-        f"⏰ {datetime.now().strftime('%d %b, %I:%M %p')}\n"
-        f"➡️ {'Pack for pickup' if is_pickup else 'Wait for payment confirm, then dispatch'}"
-    )
+    # ── PICKUP exception: alert manager immediately (no online payment required) ──
+    if is_pickup:
+        send_message(phone_id, GROCERY_MANAGER_NUMBER,
+            f"🛒 *NEW PICKUP ORDER — {order_id}*\n\n"
+            f"💰 Total: ₹{amount:.0f} — Cash or UPI at counter\n"
+            f"🏪 PICKUP — {schedule}\n"
+            f"📱 Customer: +{from_number}\n\n"
+            f"{result['order_summary']}\n\n"
+            f"⏰ {datetime.now().strftime('%d %b, %I:%M %p')}\n"
+            f"➡️ Pack for pickup"
+        )
+    # For DELIVERY: NO manager alert yet. Wait for payment confirm via Razorpay webhook
+    # OR customer payment screenshot. Then notify_paid_order() fires the alert.
 
 # ─── 4U FASHION ────────────────────────────────────
 def handle_fashion(phone_id, from_number):
@@ -634,24 +786,13 @@ def razorpay_webhook():
 
         order = PENDING_ORDERS.pop(link_id, None) if link_id else None
         if order:
-            amount_rupees = amount_paise / 100
-            # Confirm to customer
-            send_message(order["phone_id"], order["customer_phone"],
-                f"✅ *Payment Confirmed* — ₹{amount_rupees:.0f} received 🎉\n"
-                f"📋 Order *{order['order_id']}*\n\n"
-                f"Aapka order pack ho raha hai 🛒\n"
-                f"Delivery 30-40 min me 🚚\n\n"
-                f"📞 Help: 9729119167\n\n"
-                f"Dhanyavaad! 🙏"
-            )
-            # Notify manager
-            send_message(order["phone_id"], GROCERY_MANAGER_NUMBER,
-                f"💰 *PAYMENT RECEIVED — {order['order_id']}*\n\n"
-                f"✅ ₹{amount_rupees:.0f} confirmed via UPI\n"
-                f"🆔 Razorpay Payment: {payment_id}\n"
-                f"📱 Customer: +{order['customer_phone']}\n\n"
-                f"{order['summary']}\n\n"
-                f"➡️ DISPATCH NOW 🚚"
+            PENDING_BY_CUSTOMER.pop(order["customer_phone"], None)
+            notify_paid_order(
+                order,
+                paid_amount=amount_paise / 100,
+                utr=payment_id,
+                payee="Razorpay",
+                source="Razorpay",
             )
         else:
             print(f"Razorpay webhook: no matching order for link_id={link_id}")

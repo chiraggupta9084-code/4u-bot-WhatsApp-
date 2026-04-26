@@ -13,20 +13,28 @@ from collections import defaultdict, deque
 def retry(times: int = 3, base_delay: float = 0.8):
     """Retry helper with exponential backoff.
 
-    Skips retries on 4xx client errors (especially 429 rate limit) — retrying
-    those would waste API quota and worsen the issue. Only retries on transient
-    network/5xx server errors.
+    Behavior by status:
+      • 5xx + network errors → full retry budget
+      • 429 rate limit       → ONE extra retry with 2s delay (absorbs bursty limits)
+      • Other 4xx            → don't retry, surface immediately
     """
     def deco(fn):
         def wrapper(*args, **kwargs):
             last_exc = None
+            rate_limited_once = False
             for i in range(times):
                 try:
                     return fn(*args, **kwargs)
                 except requests.HTTPError as e:
-                    # Don't retry 4xx — bad request or rate limit. Just surface.
-                    if e.response is not None and 400 <= e.response.status_code < 500:
-                        raise
+                    if e.response is not None:
+                        code = e.response.status_code
+                        if code == 429 and not rate_limited_once:
+                            rate_limited_once = True
+                            last_exc = e
+                            time.sleep(2.0)
+                            continue
+                        if 400 <= code < 500:
+                            raise
                     last_exc = e
                 except Exception as e:
                     last_exc = e

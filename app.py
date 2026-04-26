@@ -50,10 +50,12 @@ app = Flask(__name__)
 
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "4ubots_verify_token")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")  # kept for legacy OCR path
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 API_URL = "https://graph.facebook.com/v19.0"
-# gemini-2.0-flash has 1500 RPD on free tier (vs 250 on 2.5-flash) — far safer for production
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 GROCERY_UPI_ID = "paytm.s1a4w0w@pty"
 GROCERY_UPI_NAME = "4U Grocery"
@@ -72,7 +74,7 @@ REFRESH_SECRET = os.environ.get("REFRESH_SECRET", "")
 # Keep this list aligned with all env vars actually set on Render — refresh
 # endpoint reads these at runtime and PUTs them back with WHATSAPP_TOKEN updated.
 ENV_KEYS_TO_PRESERVE = [
-    "VERIFY_TOKEN", "WHATSAPP_TOKEN", "GEMINI_API_KEY",
+    "VERIFY_TOKEN", "WHATSAPP_TOKEN", "GEMINI_API_KEY", "GROQ_API_KEY",
     "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_WEBHOOK_SECRET",
     "META_APP_ID", "META_APP_SECRET",
     "RENDER_API_KEY", "RENDER_SERVICE_ID", "REFRESH_SECRET",
@@ -611,9 +613,26 @@ def notify_paid_order(pending: dict, paid_amount: float, utr: str, payee: str, s
     )
 
 
-def gemini_grocery_reply(from_number, text):
-    """Returns dict with reply + order details."""
-    if not GEMINI_API_KEY:
+def _history_to_groq_messages(history):
+    """Convert our internal Gemini-shape history to OpenAI/Groq chat message format."""
+    out = []
+    for entry in history:
+        role = entry.get("role")
+        # Pull text out of either Gemini's parts shape or plain content
+        if "parts" in entry and entry["parts"]:
+            content = entry["parts"][0].get("text", "")
+        else:
+            content = entry.get("content", "")
+        if role == "model":
+            role = "assistant"
+        if role in ("user", "assistant") and content:
+            out.append({"role": role, "content": content})
+    return out
+
+
+def groq_grocery_reply(from_number, text):
+    """Returns dict with reply + order details using Groq Llama 3.3 70B."""
+    if not GROQ_API_KEY:
         return {
             "reply": "🛒 *Welcome to 4U Grocery*\n\nBataiye kya order karna hai?\n📞 9729119167",
             "order_complete": False,
@@ -627,56 +646,63 @@ def gemini_grocery_reply(from_number, text):
     history.append({"role": "user", "parts": [{"text": text}]})
 
     catalog_block = _build_catalog_context(text)
-    system_text = GROCERY_SYSTEM_PROMPT + "\n\n" + catalog_block
+    schema_hint = (
+        "\n\n# OUTPUT FORMAT (CRITICAL)\n"
+        "Reply with ONLY a single JSON object, no prose around it. Schema:\n"
+        '{\n'
+        '  "reply": "string — your Hinglish reply to send to customer",\n'
+        '  "order_complete": true|false,\n'
+        '  "order_summary": "string (empty if order_complete=false)",\n'
+        '  "total_amount": number (0 if order_complete=false),\n'
+        '  "delivery_or_pickup": "delivery"|"pickup"|"",\n'
+        '  "schedule_text": "string (e.g. ASAP / Tomorrow 10 AM / empty)"\n'
+        '}\n'
+    )
+    system_text = GROCERY_SYSTEM_PROMPT + "\n\n" + catalog_block + schema_hint
+
+    messages = [{"role": "system", "content": system_text}] + _history_to_groq_messages(history)
 
     payload = {
-        "contents": list(history),
-        "systemInstruction": {"parts": [{"text": system_text}]},
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "object",
-                "properties": {
-                    "reply": {"type": "string"},
-                    "order_complete": {"type": "boolean"},
-                    "order_summary": {"type": "string"},
-                    "total_amount": {"type": "number"},
-                    "delivery_or_pickup": {"type": "string"},
-                    "schedule_text": {"type": "string"},
-                },
-                "required": ["reply", "order_complete", "order_summary", "total_amount", "delivery_or_pickup", "schedule_text"],
-            },
-            "temperature": 0.5,
-            "maxOutputTokens": 1200,
-        },
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "response_format": {"type": "json_object"},
+        "temperature": 0.5,
+        "max_tokens": 1200,
     }
 
     @retry(times=3)
     def _call():
-        r = requests.post(f"{GEMINI_URL}?key={GEMINI_API_KEY}", json=payload, timeout=25)
+        r = requests.post(
+            GROQ_URL,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=25,
+        )
         r.raise_for_status()
         return r.json()
+
     try:
         data = _call()
-        text_out = data["candidates"][0]["content"]["parts"][0]["text"]
+        text_out = data["choices"][0]["message"]["content"]
         parsed = json.loads(text_out)
         result = {
-            "reply": parsed.get("reply", "").strip(),
+            "reply": (parsed.get("reply") or "").strip(),
             "order_complete": bool(parsed.get("order_complete", False)),
             "order_summary": (parsed.get("order_summary") or "").strip(),
             "total_amount": float(parsed.get("total_amount") or 0),
             "delivery_or_pickup": (parsed.get("delivery_or_pickup") or "").strip().lower(),
             "schedule_text": (parsed.get("schedule_text") or "").strip(),
         }
+        # Save assistant reply to history
         history.append({"role": "model", "parts": [{"text": result["reply"]}]})
         return result
     except Exception as e:
-        print(f"Gemini gave up: {e}")
-        # Pop the user message we appended so it doesn't poison history with no
-        # assistant reply alongside it (would skew next turn's understanding).
+        print(f"Groq gave up: {e}")
         if history and history[-1].get("role") == "user":
             history.pop()
-        # Conversation-preserving fallback — does NOT reset context with a fresh greeting.
         return {
             "reply": (
                 "Ek minute ji 🙏 — system thoda busy hai, "
@@ -689,6 +715,10 @@ def gemini_grocery_reply(from_number, text):
             "delivery_or_pickup": "",
             "schedule_text": "",
         }
+
+
+# Alias to keep old call sites working
+gemini_grocery_reply = groq_grocery_reply
 
 
 def handle_grocery(phone_id, from_number, text):

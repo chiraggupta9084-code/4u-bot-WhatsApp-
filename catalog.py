@@ -73,20 +73,73 @@ def _normalize_name(s: str) -> str:
     return (s or "").lower()
 
 
+# Map customer query words → category code (for category-filtered search)
+QUERY_TO_CATEGORY = {
+    "butter": "BUTTER", "makhan": "BUTTER",
+    "ghee": "GHEE",
+    "cheese": "CHEESE",
+    "paneer": "DAIRY_OTHER", "dahi": "DAIRY_OTHER", "curd": "DAIRY_OTHER", "cream": "DAIRY_OTHER",
+    "doodh": "DAIRY_OTHER", "milk": "DAIRY_OTHER",
+    "popcorn": "POPCORN", "pops": "POPCORN",
+    "chocolate": "CHOCOLATE", "choco": "CHOCOLATE", "cadbury": "CHOCOLATE",
+    "ice": "ICE_CREAM", "icecream": "ICE_CREAM", "kulfi": "ICE_CREAM",
+    "biscuit": "BISCUIT", "cookie": "BISCUIT", "rusk": "BISCUIT",
+    "namkeen": "NAMKEEN_CHIPS", "chips": "NAMKEEN_CHIPS", "snack": "NAMKEEN_CHIPS",
+    "kurkure": "NAMKEEN_CHIPS", "bhujia": "NAMKEEN_CHIPS",
+    "maggi": "NOODLES", "noodles": "NOODLES", "pasta": "NOODLES",
+    "juice": "DRINK_COLD", "cold": "DRINK_COLD", "soda": "DRINK_COLD",
+    "coke": "DRINK_COLD", "pepsi": "DRINK_COLD", "kool": "DRINK_COLD", "shake": "DRINK_COLD",
+    "water": "WATER", "bisleri": "WATER",
+    "tea": "TEA_COFFEE", "chai": "TEA_COFFEE", "coffee": "TEA_COFFEE", "bru": "TEA_COFFEE",
+    "spice": "SPICE", "masala": "SPICE", "haldi": "SPICE", "mirch": "SPICE",
+    "jeera": "SPICE", "dhaniya": "SPICE",
+    "salt": "SALT", "namak": "SALT",
+    "sugar": "SUGAR", "cheeni": "SUGAR", "shakkar": "SUGAR", "honey": "SUGAR", "shahad": "SUGAR",
+    "oil": "OIL", "tel": "OIL", "refined": "OIL", "mustard": "OIL",
+    "atta": "ATTA", "flour": "ATTA", "maida": "ATTA", "besan": "ATTA",
+    "rice": "RICE", "chawal": "RICE", "basmati": "RICE",
+    "dal": "DAL", "moong": "DAL", "chana": "DAL",
+    "soap": "SOAP", "saban": "SOAP", "saabun": "SOAP",
+    "shampoo": "HAIR_CARE", "conditioner": "HAIR_CARE", "hair": "HAIR_CARE",
+    "toothpaste": "ORAL_CARE", "manjan": "ORAL_CARE", "tooth": "ORAL_CARE", "brush": "ORAL_CARE",
+    "detergent": "DETERGENT", "surf": "DETERGENT", "tide": "DETERGENT", "ariel": "DETERGENT",
+    "harpic": "CLEANING", "lizol": "CLEANING", "vim": "CLEANING",
+    "pad": "HYGIENE", "wipes": "HYGIENE", "whisper": "HYGIENE", "sanitary": "HYGIENE",
+    "diaper": "BABY", "pampers": "BABY", "baby": "BABY",
+    "toy": "TOY", "toys": "TOY",
+    "pen": "STATIONERY", "pencil": "STATIONERY", "copy": "STATIONERY", "notebook": "STATIONERY",
+    "agarbatti": "POOJA", "incense": "POOJA", "diya": "POOJA",
+    "bread": "BREAD", "bun": "BREAD", "cake": "BREAD",
+    "egg": "EGG", "anda": "EGG",
+}
+
+
+def _detect_category(query: str) -> str | None:
+    """If query mentions a known category keyword, return its category code."""
+    q = (query or "").lower()
+    for word, cat in QUERY_TO_CATEGORY.items():
+        # word boundary check
+        if f" {word} " in f" {q} " or q == word or q.startswith(word + " ") or q.endswith(" " + word):
+            return cat
+    return None
+
+
 def search_catalog(query: str, limit: int = 30):
     """Return matching items for a customer query.
 
-    Scoring per query token:
-      +3 if token is a complete word in the item name (highest signal)
-      +1 if token only appears as substring (e.g. "atta" inside "khatta") — low signal
-      +0.5 in-stock bonus
-    Also dedupes the query token list so synonym-expanded duplicates don't double-count.
+    Two-stage:
+      1. If query mentions a known category keyword (butter/popcorn/chocolate/etc.),
+         restrict the search universe to items in that category only.
+         This is what stops "butter" from matching popcorn-with-butter-flavor.
+      2. Within the (possibly restricted) universe, score by:
+           +3 per exact word match in name
+           +1 per substring token match
+           +0.5 in-stock bonus
     """
     q = _expand_query(query)
     if not q.strip():
         return []
 
-    # Dedupe + filter tokens
     seen = set()
     tokens = []
     for t in q.split():
@@ -96,8 +149,12 @@ def search_catalog(query: str, limit: int = 30):
     if not tokens:
         return []
 
+    # Category-filter step
+    cat = _detect_category(query)
+    universe = [i for i in CATALOG if i.get("category") == cat] if cat else CATALOG
+
     scored = []
-    for item in CATALOG:
+    for item in universe:
         name_norm = _normalize_name(item["name"])
         name_words = set(name_norm.split())
         score = 0
@@ -106,6 +163,10 @@ def search_catalog(query: str, limit: int = 30):
                 score += 3
             elif t in name_norm:
                 score += 1
+        # When category-filtered, give small base score so ALL items in the
+        # category surface even if name doesn't contain the query word
+        if cat and score == 0:
+            score = 0.1
         if score == 0:
             continue
         if item["stock"] > 0:

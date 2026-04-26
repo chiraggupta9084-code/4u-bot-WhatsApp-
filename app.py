@@ -4,9 +4,28 @@ import os
 import json
 import re
 import io
+import time
 import base64
 import urllib.parse
 from collections import defaultdict, deque
+
+
+def retry(times: int = 3, base_delay: float = 0.8):
+    """Tiny retry helper with exponential backoff. Returns last exception's value via fn re-raise."""
+    def deco(fn):
+        def wrapper(*args, **kwargs):
+            last_exc = None
+            for i in range(times):
+                try:
+                    return fn(*args, **kwargs)
+                except Exception as e:
+                    last_exc = e
+                    if i < times - 1:
+                        time.sleep(base_delay * (2 ** i))
+            raise last_exc
+        return wrapper
+    return deco
+
 
 import hmac
 import hashlib
@@ -388,28 +407,31 @@ def generate_order_id() -> str:
 
 
 # ─── PAYMENT SCREENSHOT OCR ────────────────────────
+@retry(times=3)
+def _fetch_whatsapp_media_inner(media_id: str) -> bytes:
+    meta = requests.get(
+        f"{API_URL}/{media_id}",
+        headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
+        timeout=15,
+    ).json()
+    url = meta.get("url")
+    if not url:
+        raise RuntimeError(f"Media {media_id}: no URL returned")
+    r = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
+        timeout=20,
+    )
+    r.raise_for_status()
+    return r.content
+
+
 def fetch_whatsapp_media(media_id: str) -> bytes | None:
-    """Download an image from WhatsApp Cloud by media_id."""
+    """Download an image from WhatsApp Cloud by media_id, with silent retries."""
     try:
-        # Step 1: get the URL
-        meta = requests.get(
-            f"{API_URL}/{media_id}",
-            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
-            timeout=15,
-        ).json()
-        url = meta.get("url")
-        if not url:
-            print(f"Media {media_id}: no URL returned")
-            return None
-        # Step 2: download the bytes
-        r = requests.get(
-            url,
-            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
-            timeout=20,
-        )
-        return r.content if r.ok else None
+        return _fetch_whatsapp_media_inner(media_id)
     except Exception as e:
-        print(f"fetch_whatsapp_media error: {e}")
+        print(f"fetch_whatsapp_media gave up after retries: {e}")
         return None
 
 
@@ -448,14 +470,17 @@ def ocr_payment_screenshot(image_bytes: bytes) -> dict:
             "temperature": 0.1,
         },
     }
-    try:
+    @retry(times=3)
+    def _call():
         r = requests.post(f"{GEMINI_URL}?key={GEMINI_API_KEY}", json=payload, timeout=25)
         r.raise_for_status()
-        data = r.json()
+        return r.json()
+    try:
+        data = _call()
         text_out = data["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(text_out)
     except Exception as e:
-        print(f"OCR error: {e}")
+        print(f"OCR gave up after retries: {e}")
         return {"looks_valid": False}
 
 
@@ -463,24 +488,22 @@ def handle_payment_screenshot(phone_id: str, from_number: str, media_id: str):
     """Customer sent an image. Try to read it as payment proof."""
     pending = PENDING_BY_CUSTOMER.get(from_number)
     if not pending:
-        send_message(phone_id, from_number,
-            "Photo mil gayi 📸 — lekin abhi koi pending order nahi hai aapka.\n"
-            "Pehle order place karein, payment ke baad screenshot bhejna 😊\n\n"
-            "📞 Help: 9729119167"
-        )
+        # Stay quiet — don't bother customer if they shared an unrelated image
+        print(f"Image from {from_number} but no pending order; ignoring")
         return
 
     img = fetch_whatsapp_media(media_id)
     if not img:
-        send_message(phone_id, from_number, "Photo download nahi ho payi, please dobara bhejein 🙏")
+        # Silent fail — don't surface to customer. Manager check happens on Razorpay anyway.
+        print(f"Could not fetch media {media_id} for {from_number}; staying silent")
         return
 
     parsed = ocr_payment_screenshot(img)
     if not parsed.get("looks_valid"):
         send_message(phone_id, from_number,
-            "Ye payment screenshot clear nahi dikh raha 🙏\n"
-            "Please clean payment success screenshot bhejein\n"
-            "(amount + UTR/transaction ID dikhe)"
+            f"📋 Order *{pending['order_id']}* — payment screenshot clearly nahi dikh raha 🙏\n"
+            "Please ek clean screenshot bhejein jisme amount aur UTR/transaction ID dono visible ho.\n\n"
+            "Ya phir Razorpay link se pay kariye, auto-confirm ho jayega 😊"
         )
         return
 
@@ -491,6 +514,7 @@ def handle_payment_screenshot(phone_id: str, from_number: str, media_id: str):
 
     if paid + 1 < expected:  # ₹1 tolerance
         send_message(phone_id, from_number,
+            f"📋 Order *{pending['order_id']}*\n\n"
             f"Aapne ₹{paid:.0f} bheja hai, lekin order ka total ₹{expected:.0f} hai.\n"
             f"Please ₹{expected - paid:.0f} aur bhejein, phir confirm hoga 🙏"
         )
@@ -565,10 +589,13 @@ def gemini_grocery_reply(from_number, text):
         },
     }
 
-    try:
+    @retry(times=3)
+    def _call():
         r = requests.post(f"{GEMINI_URL}?key={GEMINI_API_KEY}", json=payload, timeout=25)
         r.raise_for_status()
-        data = r.json()
+        return r.json()
+    try:
+        data = _call()
         text_out = data["candidates"][0]["content"]["parts"][0]["text"]
         parsed = json.loads(text_out)
         result = {
@@ -582,9 +609,10 @@ def gemini_grocery_reply(from_number, text):
         history.append({"role": "model", "parts": [{"text": result["reply"]}]})
         return result
     except Exception as e:
-        print(f"Gemini API error: {e}")
+        print(f"Gemini gave up after retries: {e}")
+        # Soft, non-technical fallback
         return {
-            "reply": "🛒 Thoda technical issue hai, ek minute me reply karte hain.\n📞 9729119167",
+            "reply": "Namaste! 🙏 Bataiye kya order karna hai aaj? Sugar, atta, dal, oil, dairy — sab available hai 😊\n📞 9729119167",
             "order_complete": False,
             "order_summary": "",
             "total_amount": 0.0,

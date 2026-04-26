@@ -51,6 +51,22 @@ RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
 RAZORPAY_WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
 
+# Auto-refresh credentials (for self-renewing the WhatsApp long-lived token)
+META_APP_ID = os.environ.get("META_APP_ID", "")
+META_APP_SECRET = os.environ.get("META_APP_SECRET", "")
+RENDER_API_KEY = os.environ.get("RENDER_API_KEY", "")
+RENDER_SERVICE_ID = os.environ.get("RENDER_SERVICE_ID", "")
+REFRESH_SECRET = os.environ.get("REFRESH_SECRET", "")
+
+# Keep this list aligned with all env vars actually set on Render — refresh
+# endpoint reads these at runtime and PUTs them back with WHATSAPP_TOKEN updated.
+ENV_KEYS_TO_PRESERVE = [
+    "VERIFY_TOKEN", "WHATSAPP_TOKEN", "GEMINI_API_KEY",
+    "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_WEBHOOK_SECRET",
+    "META_APP_ID", "META_APP_SECRET",
+    "RENDER_API_KEY", "RENDER_SERVICE_ID", "REFRESH_SECRET",
+]
+
 RAZORPAY_API = "https://api.razorpay.com/v1"
 razorpay_enabled = bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
 
@@ -832,6 +848,105 @@ def razorpay_webhook():
             print(f"Razorpay webhook: no matching order for link_id={link_id}")
 
     return jsonify({"status": "ok"}), 200
+
+
+# ─── WHATSAPP TOKEN AUTO-REFRESH ──────────────────
+def _token_expires_at() -> int | None:
+    """Return Unix timestamp when current WHATSAPP_TOKEN expires (or None on error)."""
+    try:
+        r = requests.get(
+            "https://graph.facebook.com/v25.0/debug_token",
+            params={"input_token": WHATSAPP_TOKEN, "access_token": WHATSAPP_TOKEN},
+            timeout=10,
+        )
+        return r.json().get("data", {}).get("expires_at")
+    except Exception as e:
+        print(f"debug_token error: {e}")
+        return None
+
+
+@app.route("/refresh-token", methods=["GET", "POST"])
+def refresh_token_endpoint():
+    """Auto-renew WhatsApp long-lived token. Idempotent — only refreshes if <7 days left.
+
+    Call: GET /refresh-token?secret=<REFRESH_SECRET>
+    Set up UptimeRobot or cron-job.org to ping this once a day.
+    """
+    if not REFRESH_SECRET or request.args.get("secret") != REFRESH_SECRET:
+        return jsonify({"error": "forbidden"}), 403
+    if not (META_APP_ID and META_APP_SECRET and RENDER_API_KEY and RENDER_SERVICE_ID):
+        return jsonify({"error": "auto-refresh not configured (missing env vars)"}), 500
+
+    exp = _token_expires_at()
+    now = int(time.time())
+    if exp is None:
+        return jsonify({"error": "could not check token expiry"}), 500
+
+    days_left = (exp - now) / 86400 if exp > 0 else 9999
+    print(f"Token expires_at={exp}, days_left={days_left:.1f}")
+
+    # Only refresh if <7 days left
+    if days_left > 7:
+        return jsonify({"status": "skip", "days_left": round(days_left, 1)})
+
+    # Exchange current token for a new 60-day token
+    try:
+        r = requests.get(
+            "https://graph.facebook.com/v25.0/oauth/access_token",
+            params={
+                "grant_type": "fb_exchange_token",
+                "client_id": META_APP_ID,
+                "client_secret": META_APP_SECRET,
+                "fb_exchange_token": WHATSAPP_TOKEN,
+            },
+            timeout=15,
+        )
+        new_token = r.json().get("access_token")
+        if not new_token:
+            return jsonify({"error": "exchange failed", "details": r.json()}), 500
+    except Exception as e:
+        return jsonify({"error": f"exchange exception: {e}"}), 500
+
+    # Push new token to Render env vars (must include all preserved keys)
+    env_payload = []
+    for k in ENV_KEYS_TO_PRESERVE:
+        v = new_token if k == "WHATSAPP_TOKEN" else os.environ.get(k, "")
+        if v:
+            env_payload.append({"key": k, "value": v})
+    try:
+        rr = requests.put(
+            f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/env-vars",
+            headers={
+                "Authorization": f"Bearer {RENDER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=env_payload,
+            timeout=15,
+        )
+        if not rr.ok:
+            return jsonify({"error": "render env update failed", "details": rr.text[:300]}), 500
+    except Exception as e:
+        return jsonify({"error": f"render env exception: {e}"}), 500
+
+    # Trigger a redeploy so the new token takes effect
+    try:
+        requests.post(
+            f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/deploys",
+            headers={
+                "Authorization": f"Bearer {RENDER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={},
+            timeout=15,
+        )
+    except Exception as e:
+        return jsonify({"error": f"render deploy exception: {e}", "token_updated": True}), 500
+
+    return jsonify({
+        "status": "refreshed",
+        "old_days_left": round(days_left, 1),
+        "redeploy": "triggered",
+    })
 
 
 # ─── HEALTH CHECK ──────────────────────────────────

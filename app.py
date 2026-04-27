@@ -71,19 +71,64 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 def _build_provider_chain():
-    """Multi-provider AI chain. Bot tries each in order; on rate-limit moves to next."""
+    """Multi-provider AI chain. Bot tries each in order; on rate-limit moves to next.
+    Add a key to the env var → provider auto-joins the chain. Order = priority."""
     chain = []
+
+    # Groq (multiple keys for parallel quota)
     for label, key in [("groq-1", GROQ_API_KEY), ("groq-2", GROQ_API_KEY_2), ("groq-3", GROQ_API_KEY_3)]:
         if key:
             chain.append({"name": label, "format": "openai", "url": GROQ_URL,
                           "key": key, "model": GROQ_MODEL})
+
+    # Cerebras Cloud — free, very fast (OpenAI-compatible)
+    cerebras_key = os.environ.get("CEREBRAS_API_KEY", "")
+    if cerebras_key:
+        chain.append({"name": "cerebras", "format": "openai",
+                      "url": "https://api.cerebras.ai/v1/chat/completions",
+                      "key": cerebras_key, "model": "llama-3.3-70b"})
+
+    # Together AI — generous free tier (OpenAI-compatible)
+    together_key = os.environ.get("TOGETHER_API_KEY", "")
+    if together_key:
+        chain.append({"name": "together", "format": "openai",
+                      "url": "https://api.together.xyz/v1/chat/completions",
+                      "key": together_key,
+                      "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"})
+
+    # Mistral La Plateforme — free tier (OpenAI-compatible)
+    mistral_key = os.environ.get("MISTRAL_API_KEY", "")
+    if mistral_key:
+        chain.append({"name": "mistral", "format": "openai",
+                      "url": "https://api.mistral.ai/v1/chat/completions",
+                      "key": mistral_key, "model": "mistral-small-latest"})
+
+    # OpenRouter — 27+ free models (OpenAI-compatible)
     if OPENROUTER_API_KEY:
         chain.append({"name": "openrouter", "format": "openai", "url": OPENROUTER_URL,
                       "key": OPENROUTER_API_KEY,
                       "model": "openai/gpt-oss-20b:free"})
+
+    # Cohere — free tier
+    cohere_key = os.environ.get("COHERE_API_KEY", "")
+    if cohere_key:
+        chain.append({"name": "cohere", "format": "openai",
+                      "url": "https://api.cohere.com/compatibility/v1/chat/completions",
+                      "key": cohere_key, "model": "command-r-08-2024"})
+
+    # Fireworks AI — free credits (OpenAI-compatible)
+    fireworks_key = os.environ.get("FIREWORKS_API_KEY", "")
+    if fireworks_key:
+        chain.append({"name": "fireworks", "format": "openai",
+                      "url": "https://api.fireworks.ai/inference/v1/chat/completions",
+                      "key": fireworks_key,
+                      "model": "accounts/fireworks/models/llama-v3p1-8b-instruct"})
+
+    # Gemini — final fallback (different API shape)
     if GEMINI_API_KEY:
         chain.append({"name": "gemini", "format": "gemini",
                       "url": GEMINI_URL, "key": GEMINI_API_KEY, "model": "gemini-2.0-flash"})
+
     return chain
 
 GROCERY_UPI_ID = "paytm.s1a4w0w@pty"
@@ -104,7 +149,9 @@ REFRESH_SECRET = os.environ.get("REFRESH_SECRET", "")
 # endpoint reads these at runtime and PUTs them back with WHATSAPP_TOKEN updated.
 ENV_KEYS_TO_PRESERVE = [
     "VERIFY_TOKEN", "WHATSAPP_TOKEN",
-    "GEMINI_API_KEY", "GROQ_API_KEY", "GROQ_API_KEY_2", "GROQ_API_KEY_3", "OPENROUTER_API_KEY",
+    "GEMINI_API_KEY", "GROQ_API_KEY", "GROQ_API_KEY_2", "GROQ_API_KEY_3",
+    "OPENROUTER_API_KEY", "CEREBRAS_API_KEY", "TOGETHER_API_KEY",
+    "MISTRAL_API_KEY", "COHERE_API_KEY", "FIREWORKS_API_KEY",
     "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_WEBHOOK_SECRET",
     "META_APP_ID", "META_APP_SECRET",
     "RENDER_API_KEY", "RENDER_SERVICE_ID", "REFRESH_SECRET",

@@ -58,12 +58,33 @@ app = Flask(__name__)
 
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "4ubots_verify_token")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")  # kept for legacy OCR path
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_API_KEY_2 = os.environ.get("GROQ_API_KEY_2", "")
+GROQ_API_KEY_3 = os.environ.get("GROQ_API_KEY_3", "")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 API_URL = "https://graph.facebook.com/v19.0"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "groq/compound-mini"
+GROQ_MODEL = "llama-3.1-8b-instant"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+def _build_provider_chain():
+    """Multi-provider AI chain. Bot tries each in order; on rate-limit moves to next."""
+    chain = []
+    for label, key in [("groq-1", GROQ_API_KEY), ("groq-2", GROQ_API_KEY_2), ("groq-3", GROQ_API_KEY_3)]:
+        if key:
+            chain.append({"name": label, "format": "openai", "url": GROQ_URL,
+                          "key": key, "model": GROQ_MODEL})
+    if OPENROUTER_API_KEY:
+        chain.append({"name": "openrouter", "format": "openai", "url": OPENROUTER_URL,
+                      "key": OPENROUTER_API_KEY,
+                      "model": "meta-llama/llama-3.1-8b-instruct:free"})
+    if GEMINI_API_KEY:
+        chain.append({"name": "gemini", "format": "gemini",
+                      "url": GEMINI_URL, "key": GEMINI_API_KEY, "model": "gemini-2.0-flash"})
+    return chain
 
 GROCERY_UPI_ID = "paytm.s1a4w0w@pty"
 GROCERY_UPI_NAME = "4U Grocery"
@@ -82,7 +103,8 @@ REFRESH_SECRET = os.environ.get("REFRESH_SECRET", "")
 # Keep this list aligned with all env vars actually set on Render — refresh
 # endpoint reads these at runtime and PUTs them back with WHATSAPP_TOKEN updated.
 ENV_KEYS_TO_PRESERVE = [
-    "VERIFY_TOKEN", "WHATSAPP_TOKEN", "GEMINI_API_KEY", "GROQ_API_KEY",
+    "VERIFY_TOKEN", "WHATSAPP_TOKEN",
+    "GEMINI_API_KEY", "GROQ_API_KEY", "GROQ_API_KEY_2", "GROQ_API_KEY_3", "OPENROUTER_API_KEY",
     "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_WEBHOOK_SECRET",
     "META_APP_ID", "META_APP_SECRET",
     "RENDER_API_KEY", "RENDER_SERVICE_ID", "REFRESH_SECRET",
@@ -536,18 +558,75 @@ def _history_to_groq_messages(history):
     return out
 
 
-def groq_grocery_reply(from_number, text):
-    """Returns dict with reply + order details using Groq Llama 3.3 70B."""
-    if not GROQ_API_KEY:
-        return {
-            "reply": "🛒 *Welcome to 4U Grocery*\n\nBataiye kya order karna hai?\n📞 9729119167",
-            "order_complete": False,
-            "order_summary": "",
-            "total_amount": 0.0,
-            "delivery_or_pickup": "",
-            "schedule_text": "",
-        }
+def _call_openai_compat(provider, system_text, openai_messages):
+    """Call any OpenAI-compatible endpoint (Groq, OpenRouter)."""
+    payload = {
+        "model": provider["model"],
+        "messages": [{"role": "system", "content": system_text}] + openai_messages,
+        "response_format": {"type": "json_object"},
+        "temperature": 0.5,
+        "max_tokens": 1200,
+    }
+    headers = {
+        "Authorization": f"Bearer {provider['key']}",
+        "Content-Type": "application/json",
+    }
+    # OpenRouter likes a referer header
+    if "openrouter" in provider["url"]:
+        headers["HTTP-Referer"] = "https://fouru-whatsapp-bot.onrender.com"
+        headers["X-Title"] = "4U Grocery Bot"
+    r = requests.post(provider["url"], headers=headers, json=payload, timeout=25)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
 
+
+def _call_gemini(provider, system_text, openai_messages):
+    """Call Gemini API; convert OpenAI-shape messages to Gemini's `contents`."""
+    contents = []
+    for m in openai_messages:
+        role = "user" if m["role"] == "user" else "model"
+        contents.append({"role": role, "parts": [{"text": m["content"]}]})
+    payload = {
+        "contents": contents,
+        "systemInstruction": {"parts": [{"text": system_text}]},
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.5,
+            "maxOutputTokens": 1200,
+        },
+    }
+    r = requests.post(f"{provider['url']}?key={provider['key']}", json=payload, timeout=25)
+    r.raise_for_status()
+    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+
+def call_ai_chain(system_text, openai_messages):
+    """Try each provider in chain until one succeeds. Raises if all fail."""
+    chain = _build_provider_chain()
+    if not chain:
+        raise RuntimeError("No AI providers configured")
+    last_exc = None
+    for provider in chain:
+        try:
+            if provider["format"] == "openai":
+                return provider["name"], _call_openai_compat(provider, system_text, openai_messages)
+            else:
+                return provider["name"], _call_gemini(provider, system_text, openai_messages)
+        except requests.HTTPError as e:
+            code = e.response.status_code if e.response is not None else 0
+            print(f"AI provider {provider['name']} failed: HTTP {code} — trying next")
+            last_exc = e
+            # On 429/403/5xx — try next. On 400/401 — skip provider too (likely bad key).
+            continue
+        except Exception as e:
+            print(f"AI provider {provider['name']} exception: {e} — trying next")
+            last_exc = e
+            continue
+    raise RuntimeError(f"All AI providers exhausted; last error: {last_exc}")
+
+
+def groq_grocery_reply(from_number, text):
+    """Returns dict with reply + order details. Uses multi-provider AI chain."""
     history = GROCERY_HISTORY[from_number]
     history.append({"role": "user", "parts": [{"text": text}]})
 
@@ -556,43 +635,20 @@ def groq_grocery_reply(from_number, text):
         "\n\n# OUTPUT FORMAT (CRITICAL)\n"
         "Reply with ONLY a single JSON object, no prose around it. Schema:\n"
         '{\n'
-        '  "reply": "string — your Hinglish reply to send to customer",\n'
+        '  "reply": "Hinglish reply for customer",\n'
         '  "order_complete": true|false,\n'
-        '  "order_summary": "string (empty if order_complete=false)",\n'
-        '  "total_amount": number (0 if order_complete=false),\n'
+        '  "order_summary": "string (empty if not complete)",\n'
+        '  "total_amount": number (0 if not complete),\n'
         '  "delivery_or_pickup": "delivery"|"pickup"|"",\n'
-        '  "schedule_text": "string (e.g. ASAP / Tomorrow 10 AM / empty)"\n'
+        '  "schedule_text": "ASAP|specific time|empty"\n'
         '}\n'
     )
     system_text = GROCERY_SYSTEM_PROMPT + "\n\n" + catalog_block + schema_hint
-
-    messages = [{"role": "system", "content": system_text}] + _history_to_groq_messages(history)
-
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": messages,
-        "response_format": {"type": "json_object"},
-        "temperature": 0.5,
-        "max_tokens": 1200,
-    }
-
-    @retry(times=3)
-    def _call():
-        r = requests.post(
-            GROQ_URL,
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=25,
-        )
-        r.raise_for_status()
-        return r.json()
+    messages = _history_to_groq_messages(history)
 
     try:
-        data = _call()
-        text_out = data["choices"][0]["message"]["content"]
+        provider_used, text_out = call_ai_chain(system_text, messages)
+        print(f"AI reply via {provider_used}")
         parsed = json.loads(text_out)
         result = {
             "reply": (parsed.get("reply") or "").strip(),
@@ -602,11 +658,10 @@ def groq_grocery_reply(from_number, text):
             "delivery_or_pickup": (parsed.get("delivery_or_pickup") or "").strip().lower(),
             "schedule_text": (parsed.get("schedule_text") or "").strip(),
         }
-        # Save assistant reply to history
         history.append({"role": "model", "parts": [{"text": result["reply"]}]})
         return result
     except Exception as e:
-        print(f"Groq gave up: {e}")
+        print(f"AI chain exhausted: {e}")
         if history and history[-1].get("role") == "user":
             history.pop()
         return {
@@ -623,8 +678,9 @@ def groq_grocery_reply(from_number, text):
         }
 
 
-# Alias to keep old call sites working
+# Aliases for existing call sites
 gemini_grocery_reply = groq_grocery_reply
+ai_grocery_reply = groq_grocery_reply
 
 
 def handle_grocery(phone_id, from_number, text):

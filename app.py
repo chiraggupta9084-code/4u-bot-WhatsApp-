@@ -714,6 +714,81 @@ FAST_PAYMENT = (
 FAST_THANKS = "Welcome ji 🙏 Aur kuch chahiye to bataiye!"
 
 
+def _format_catalog_reply(matches: list, query: str) -> str:
+    """Build a brand-grouped catalog reply WITHOUT calling AI. Used for simple item lookups."""
+    in_stock = [m for m in matches if m["stock"] > 0]
+    if not in_stock:
+        return None  # let AI handle "out of stock" suggestions
+
+    # Group by first word of name (usually brand). e.g. "AMUL BUTTER 100G" -> "AMUL"
+    by_brand = {}
+    for m in in_stock[:12]:  # cap at 12 to keep message readable
+        first = m["name"].split()[0]
+        by_brand.setdefault(first, []).append(m)
+
+    lines = [f"*{query.title()} available* 🛒\n"]
+    for brand, items in by_brand.items():
+        lines.append(f"\n*{brand}*")
+        for it in items:
+            disc = round((it["mrp"] - it["price"]) / it["mrp"] * 100) if it["mrp"] > 0 else 0
+            # show pack size from name (last token usually has size)
+            label = " ".join(it["name"].split()[1:]) or it["name"]
+            disc_str = f" ({disc}% OFF)" if disc > 0 else ""
+            lines.append(f"• {label} — ~₹{it['mrp']:.0f}~ *₹{it['price']:.0f}*{disc_str}")
+    lines.append("\nKaunsa aur kitne packets chahiye?")
+    return "\n".join(lines)
+
+
+def _instant_item_lookup(text: str, history) -> str | None:
+    """If customer query is a simple item lookup (1-4 words, no address/qty/order context)
+    AND catalog has matches → format reply directly, skip AI entirely."""
+    msg = (text or "").lower().strip()
+    if len(msg) > 50:  # too complex
+        return None
+    word_count = len(msg.split())
+    if word_count > 5 or word_count < 1:
+        return None
+    # If it's a clear order/address message, let AI handle
+    order_signals = ["address", "house", "ward", "narnaul", "naam", "name",
+                     "kg", "litre", "ltr", "packet", "pcs", "qty"]
+    if any(s in msg for s in order_signals):
+        return None
+    # Skip if conversation already has 3+ turns (we're mid-order)
+    if len(history) >= 4:
+        return None
+    matches = search_catalog(text, limit=12)
+    if not matches:
+        return None
+    return _format_catalog_reply(matches, text.strip())
+
+
+# Response cache for repeated AI queries — saves AI tokens dramatically
+# Key: normalized query string. Value: (timestamp, result_dict)
+# Only cached when history was empty (first message) AND order_complete=False
+RESPONSE_CACHE = {}
+CACHE_MAX = 500
+CACHE_TTL_SEC = 6 * 3600  # 6 hours
+
+
+def _cache_get(key: str):
+    entry = RESPONSE_CACHE.get(key)
+    if not entry:
+        return None
+    ts, val = entry
+    if time.time() - ts > CACHE_TTL_SEC:
+        RESPONSE_CACHE.pop(key, None)
+        return None
+    return val
+
+
+def _cache_put(key: str, value: dict):
+    if len(RESPONSE_CACHE) >= CACHE_MAX:
+        # drop oldest
+        oldest = min(RESPONSE_CACHE.items(), key=lambda x: x[1][0])
+        RESPONSE_CACHE.pop(oldest[0], None)
+    RESPONSE_CACHE[key] = (time.time(), value)
+
+
 def fast_canned_reply(text: str, history) -> str | None:
     """Rule-based instant replies for trivial inputs — saves AI tokens.
     Returns None when AI is needed (any non-trivial intent).
@@ -766,18 +841,41 @@ def fast_canned_reply(text: str, history) -> str | None:
 def handle_grocery(phone_id, from_number, text):
     history = GROCERY_HISTORY[from_number]
 
-    # Fast path: trivial intents → canned reply (no AI tokens used)
+    # 1️⃣ FASTEST PATH: trivial canned (greetings, hours, help) — no AI, no catalog search
     canned = fast_canned_reply(text, history)
     if canned is not None:
-        # Still record the turn in history so AI has context if next msg is complex
         history.append({"role": "user", "parts": [{"text": text}]})
         history.append({"role": "model", "parts": [{"text": canned}]})
         send_message(phone_id, from_number, canned)
-        print(f"FAST canned reply for: {text[:40]}")
+        print(f"FAST canned for: {text[:40]}")
         return
 
-    # AI path for everything else
+    # 2️⃣ FAST PATH: catalog-based item lookup — direct reply from catalog, no AI
+    catalog_reply = _instant_item_lookup(text, history)
+    if catalog_reply is not None:
+        history.append({"role": "user", "parts": [{"text": text}]})
+        history.append({"role": "model", "parts": [{"text": catalog_reply}]})
+        send_message(phone_id, from_number, catalog_reply)
+        print(f"CATALOG instant for: {text[:40]}")
+        return
+
+    # 3️⃣ CACHE PATH: repeat first-message AI query → use cached AI response
+    is_first = len(history) == 0
+    cache_key = text.lower().strip() if is_first else None
+    if cache_key:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            history.append({"role": "user", "parts": [{"text": text}]})
+            history.append({"role": "model", "parts": [{"text": cached["reply"]}]})
+            send_message(phone_id, from_number, cached["reply"])
+            print(f"CACHE hit for: {text[:40]}")
+            return
+
+    # 4️⃣ AI PATH: complex queries (orders, multi-turn, novel questions)
     result = gemini_grocery_reply(from_number, text)
+    # Cache successful AI response on first-message queries (helps repeat customers)
+    if cache_key and not result["order_complete"] and result["reply"]:
+        _cache_put(cache_key, result)
     send_message(phone_id, from_number, result["reply"])
 
     if not result["order_complete"] or not result["order_summary"]:

@@ -80,7 +80,7 @@ def _build_provider_chain():
     if OPENROUTER_API_KEY:
         chain.append({"name": "openrouter", "format": "openai", "url": OPENROUTER_URL,
                       "key": OPENROUTER_API_KEY,
-                      "model": "meta-llama/llama-3.1-8b-instruct:free"})
+                      "model": "openai/gpt-oss-20b:free"})
     if GEMINI_API_KEY:
         chain.append({"name": "gemini", "format": "gemini",
                       "url": GEMINI_URL, "key": GEMINI_API_KEY, "model": "gemini-2.0-flash"})
@@ -683,7 +683,100 @@ gemini_grocery_reply = groq_grocery_reply
 ai_grocery_reply = groq_grocery_reply
 
 
+FAST_WELCOME = (
+    "🛒 *Welcome to 4U Grocery*\n\n"
+    "Hum 9 AM se 9 PM available hain.\n\n"
+    "⏱️ Quick delivery — 30-40 min\n"
+    "📍 Delivery only within Narnaul (10 km area)\n"
+    "💳 Secure payment (UPI / Card / Wallet)\n\n"
+    "Bataiye, kya order karna hai?"
+)
+FAST_HELP = "📞 *4U Grocery Help:* 9729119167\n⏱️ 9 AM-9 PM | 📍 Narnaul"
+FAST_HOURS = "🕘 *Hours:* 9 AM se 9 PM\n📍 Narnaul (10 km area me delivery)"
+FAST_DELIVERY = (
+    "🚚 *Delivery charges:*\n"
+    "• Order < ₹200 → ₹40\n"
+    "• ₹200-399 → ₹30\n"
+    "• ₹400-499 → ₹20\n"
+    "• ₹500 or above → *FREE* 🎉\n\n"
+    "⏱️ 30-40 min me delivery"
+)
+FAST_LOCATION = (
+    "📍 *4U Grocery* — Narnaul\n"
+    "🚚 Delivery within 10km area only\n"
+    "🕘 9 AM-9 PM\n"
+    "📞 9729119167"
+)
+FAST_PAYMENT = (
+    "💳 *Payment:* Razorpay link bhejte hain order ke baad.\n"
+    "Accepted: UPI / Cards / Wallets / NetBanking"
+)
+FAST_THANKS = "Welcome ji 🙏 Aur kuch chahiye to bataiye!"
+
+
+def fast_canned_reply(text: str, history) -> str | None:
+    """Rule-based instant replies for trivial inputs — saves AI tokens.
+    Returns None when AI is needed (any non-trivial intent).
+    """
+    msg = (text or "").lower().strip()
+    if not msg or len(msg) > 60:
+        return None  # let AI handle longer / non-trivial messages
+
+    is_first_msg = len(history) <= 1  # only the just-appended user msg
+
+    # Greetings — only on first message of a fresh conversation
+    GREETINGS = {"hi", "hii", "hiii", "hello", "hey", "hlo", "namaste",
+                 "namaskar", "ram ram", "good morning", "good evening",
+                 "good afternoon", "gm", "ge", "start"}
+    if is_first_msg and msg in GREETINGS:
+        return FAST_WELCOME
+
+    # Thanks
+    if msg in {"thanks", "thank you", "thx", "ty", "shukriya", "dhanyavaad",
+               "dhanyawad", "thnx", "thank u"}:
+        return FAST_THANKS
+
+    # Hours
+    if any(k in msg for k in ["timing", "hours", "kab khulta", "kab khulte",
+                              "kitne baje", "kab band", "open kab", "open ho"]):
+        return FAST_HOURS
+
+    # Help / contact / phone number
+    if msg in {"help", "contact", "phone", "phone number", "number",
+               "call karo", "call me"} or "phone number" in msg:
+        return FAST_HELP
+
+    # Location / address
+    if any(k in msg for k in ["where are you", "kahan ho", "kahan", "location",
+                              "address kya", "shop kahan", "store kahan"]):
+        return FAST_LOCATION
+
+    # Delivery charges
+    if any(k in msg for k in ["delivery charge", "delivery fee",
+                              "delivery kitne", "kitna delivery", "shipping"]):
+        return FAST_DELIVERY
+
+    # Payment options
+    if msg in {"payment", "payment options", "pay", "pay kaise", "kaise pay"}:
+        return FAST_PAYMENT
+
+    return None
+
+
 def handle_grocery(phone_id, from_number, text):
+    history = GROCERY_HISTORY[from_number]
+
+    # Fast path: trivial intents → canned reply (no AI tokens used)
+    canned = fast_canned_reply(text, history)
+    if canned is not None:
+        # Still record the turn in history so AI has context if next msg is complex
+        history.append({"role": "user", "parts": [{"text": text}]})
+        history.append({"role": "model", "parts": [{"text": canned}]})
+        send_message(phone_id, from_number, canned)
+        print(f"FAST canned reply for: {text[:40]}")
+        return
+
+    # AI path for everything else
     result = gemini_grocery_reply(from_number, text)
     send_message(phone_id, from_number, result["reply"])
 

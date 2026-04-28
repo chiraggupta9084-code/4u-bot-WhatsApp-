@@ -1457,8 +1457,8 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
                 )
             return True
 
-        # /silence <phone> — pause bot auto-reply for this customer; relay msgs to manager
-        if msg.startswith("/silence") or msg.startswith("/takeover"):
+        # /manager <phone> — manager takes over the conversation; bot stays silent
+        if msg.startswith("/manager") or msg.startswith("/silence") or msg.startswith("/takeover"):
             parts = msg.split()
             if len(parts) >= 2:
                 target = parts[1].lstrip("+").lstrip("0")
@@ -1466,17 +1466,17 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
                     target = "91" + target
                 SILENCED_CUSTOMERS.add(target)
                 send_message(phone_id, from_number,
-                    f"🤐 Bot silenced for +{target}\n"
-                    f"_Aab unke saare messages aapko forward honge._\n"
-                    f"_Reply karne ke liye: `/reply {target} <message>`_\n"
-                    f"_Bot wapas chalu karne ke liye: `/resume {target}`_"
+                    f"👤 *Manager mode ON* for +{target}\n"
+                    f"_Aab customer ke saare messages aapko forward honge._\n"
+                    f"_Reply: `/reply {target} <message>`_\n"
+                    f"_Bot wapas chalu: `/bot {target}`_"
                 )
             else:
-                send_message(phone_id, from_number, "Usage: `/silence 9876543210`")
+                send_message(phone_id, from_number, "Usage: `/manager 9876543210`")
             return True
 
-        # /resume <phone> — bot takes over again
-        if msg.startswith("/resume"):
+        # /bot <phone> — give the conversation back to bot (auto-reply resumes)
+        if msg.startswith("/bot") or msg.startswith("/resume"):
             parts = msg.split()
             if len(parts) >= 2:
                 target = parts[1].lstrip("+").lstrip("0")
@@ -1484,7 +1484,8 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
                     target = "91" + target
                 SILENCED_CUSTOMERS.discard(target)
                 send_message(phone_id, from_number,
-                    f"🤖 Bot resumed for +{target}"
+                    f"🤖 *Bot mode ON* for +{target}\n"
+                    f"_Bot ne wapas customer handle karna start kar diya._"
                 )
             return True
 
@@ -1580,8 +1581,8 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
                 "*💬 Customer relay (talk through bot)*\n"
                 "▪️ `/last <phone>` — recent chat with that customer\n"
                 "▪️ `/reply <phone> <msg>` — send message to customer\n"
-                "▪️ `/silence <phone>` — pause bot, relay all msgs to you\n"
-                "▪️ `/resume <phone>` — bot takes over again\n\n"
+                "▪️ `/manager <phone>` — manager takes over (bot silent)\n"
+                "▪️ `/bot <phone>` — bot takes over again\n\n"
                 "*Example:* `/reply 9876543210 Aapka order taiyaar hai`"
             )
             return True

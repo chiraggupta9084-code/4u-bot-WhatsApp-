@@ -53,7 +53,7 @@ import qrcode
 
 import random
 from datetime import datetime
-from catalog import search_catalog, format_item_for_ai, top_offers
+from catalog import search_catalog, format_item_for_ai, top_offers, format_price_label
 
 app = Flask(__name__)
 
@@ -431,14 +431,32 @@ Store hours: 9 AM-9 PM. Delivery: only within Narnaul 10km area, 30-40 min. Help
 DELIVERY CHARGES: <₹200=₹40, ₹200-399=₹30, ₹400-499=₹20, ≥₹500=FREE.
 PAYMENT: Razorpay link only (UPI/Card/Wallet). No COD.
 
-GREETING (first message only):
-🛒 *Welcome to 4U Grocery*
-Hum 9 AM-9 PM available hain.
-⏱️ Delivery 30-40 min | 📍 Narnaul (10km only)
-💳 Secure payment (UPI/Card/Wallet)
-Bataiye kya order karna hai?
+GREETING (first message only) — use this exact format:
+🛒 *4U Grocery* — Welcome!
+──────────────────────────
+🕘 *Hours:* 9 AM – 9 PM
+⏱️ *Delivery:* 30-40 min
+📍 *Area:* Narnaul (10 km radius)
+💳 *Payment:* UPI / Card / Wallet
+──────────────────────────
 
-CATALOG: A `# CATALOG MATCHES` section shows top items. ONLY quote catalog prices, never invent. Format: `~₹58~ *₹53* (8% OFF)`. Out-of-stock items: skip, suggest in-stock alternatives. Generic query (butter/milk/atta) → list ALL matching brands grouped. Specific query (amul butter 500g) → just that item.
+Bataiye, aaj kya chahiye? 😊
+
+CATALOG: A `# CATALOG MATCHES` section shows top items. ONLY quote catalog prices, never invent.
+
+PRICE FORMAT (professional theme):
+- If item has discount (MRP > price): `~₹MRP~ *₹PRICE* (X% OFF)`
+- If discount ≥ 50%: `~₹MRP~ *₹PRICE* 🔥 *X% OFF*` — highlight big deals
+- If NO discount (MRP equals price OR catalog notes "NO DISCOUNT"): just `*₹PRICE*` — no strikethrough, no fake percentage
+
+Out-of-stock items: skip, suggest in-stock alternatives. Generic query (butter/milk/atta) → list ALL matching brands grouped. Specific query (amul butter 500g) → just that item.
+
+VISUAL STYLE for replies (professional):
+- Use heading line: 🛒 *Topic* — Available Options
+- Separator: ─────────── between sections
+- Brand groups marked with ▪️
+- Items with • bullet, indented
+- Always end with a clear question to customer
 
 UPSELL: If subtotal close to next delivery tier (₹100-199, ₹300-399, ₹400-499), nudge once: "Add ₹X more for cheaper/free delivery."
 
@@ -706,25 +724,32 @@ def notify_paid_order(pending: dict, paid_amount: float, utr: str, payee: str, s
             f"aapko *₹{reward['reward']} off* ka credit mil gaya!\n\n"
             f"Next order me apply hoga automatically 💝"
         )
+    sep = "─" * 26
     # Customer
     send_message(pending["phone_id"], pending["customer_phone"],
-        f"✅ *Payment Confirmed* — ₹{paid_amount:.0f} received 🎉\n"
-        f"📋 Order *{pending['order_id']}*\n\n"
+        f"✅ *Payment Received*\n{sep}\n"
+        f"*Order ID:* `{pending['order_id']}`\n"
+        f"*Amount:*   ₹{paid_amount:.0f}\n"
+        f"{sep}\n\n"
         f"Aapka order pack ho raha hai 🛒\n"
-        f"Delivery 30-40 min me 🚚\n\n"
-        f"📞 Help: 9729119167\n\nDhanyavaad! 🙏"
+        f"Delivery 30-40 min me pohanchega 🚚\n\n"
+        f"Dhanyavaad! 🙏\n"
+        f"📞 Help: 9729119167"
     )
-    # Manager — first time they see this order
+    # Manager
     send_message(pending["phone_id"], GROCERY_MANAGER_NUMBER,
-        f"💰 *PAID ORDER — {pending['order_id']}*\n\n"
-        f"✅ ₹{paid_amount:.0f} received via UPI ({source})\n"
-        f"🆔 Ref: {utr}\n"
-        f"💳 Payee: {payee}\n"
-        f"🚚 {pending['schedule']}\n"
-        f"📱 Customer: +{pending['customer_phone']}\n\n"
-        f"{pending['summary']}\n\n"
+        f"💰 *PAID ORDER*\n{sep}\n"
+        f"*Order ID:*  `{pending['order_id']}`\n"
+        f"*Amount:*    ₹{paid_amount:.0f}\n"
+        f"*Source:*    {source} ({payee})\n"
+        f"*Ref:*       `{utr}`\n"
+        f"*Mode:*      {pending['schedule']}\n"
+        f"*Customer:*  +{pending['customer_phone']}\n"
+        f"{sep}\n"
+        f"{pending['summary']}\n"
+        f"{sep}\n"
         f"⏰ {datetime.now().strftime('%d %b, %I:%M %p')}\n"
-        f"➡️ DISPATCH NOW 🚚"
+        f"➡️ *DISPATCH NOW* 🚚"
     )
 
 
@@ -870,59 +895,84 @@ gemini_grocery_reply = groq_grocery_reply
 ai_grocery_reply = groq_grocery_reply
 
 
+_SEP = "─" * 26
+
 FAST_WELCOME = (
-    "🛒 *Welcome to 4U Grocery*\n\n"
-    "Hum 9 AM se 9 PM available hain.\n\n"
-    "⏱️ Quick delivery — 30-40 min\n"
-    "📍 Delivery only within Narnaul (10 km area)\n"
-    "💳 Secure payment (UPI / Card / Wallet)\n\n"
-    "Bataiye, kya order karna hai?"
+    "🛒 *4U Grocery* — Welcome!\n"
+    f"{_SEP}\n"
+    "🕘 *Hours:* 9 AM – 9 PM\n"
+    "⏱️ *Delivery:* 30-40 min\n"
+    "📍 *Area:* Narnaul (10 km radius)\n"
+    "💳 *Payment:* UPI / Card / Wallet\n"
+    f"{_SEP}\n\n"
+    "Bataiye, aaj kya chahiye? 😊"
 )
-FAST_HELP = "📞 *4U Grocery Help:* 9729119167\n⏱️ 9 AM-9 PM | 📍 Narnaul"
-FAST_HOURS = "🕘 *Hours:* 9 AM se 9 PM\n📍 Narnaul (10 km area me delivery)"
+FAST_HELP = (
+    "📞 *4U Grocery — Customer Help*\n"
+    f"{_SEP}\n"
+    "Phone: 9729119167\n"
+    "Hours: 9 AM – 9 PM\n"
+    "Area:  Narnaul (10 km)"
+)
+FAST_HOURS = (
+    "🕘 *Store Hours*\n"
+    f"{_SEP}\n"
+    "Open: 9 AM – 9 PM (daily)\n"
+    "📍 Narnaul (10 km delivery area)"
+)
 FAST_DELIVERY = (
-    "🚚 *Delivery charges:*\n"
-    "• Order < ₹200 → ₹40\n"
-    "• ₹200-399 → ₹30\n"
-    "• ₹400-499 → ₹20\n"
-    "• ₹500 or above → *FREE* 🎉\n\n"
-    "⏱️ 30-40 min me delivery"
+    "🚚 *Delivery Charges*\n"
+    f"{_SEP}\n"
+    "▪️ Order *< ₹200* → ₹40\n"
+    "▪️ ₹200 – ₹399    → ₹30\n"
+    "▪️ ₹400 – ₹499    → ₹20\n"
+    "▪️ ₹500 or above  → *FREE* 🎉\n"
+    f"{_SEP}\n"
+    "⏱️ Delivery in 30-40 min"
 )
 FAST_LOCATION = (
-    "📍 *4U Grocery* — Narnaul\n"
-    "🚚 Delivery within 10km area only\n"
-    "🕘 9 AM-9 PM\n"
+    "📍 *4U Grocery — Narnaul*\n"
+    f"{_SEP}\n"
+    "🚚 Home delivery: 10 km radius\n"
+    "🕘 9 AM – 9 PM\n"
     "📞 9729119167"
 )
 FAST_PAYMENT = (
-    "💳 *Payment:* Razorpay link bhejte hain order ke baad.\n"
-    "Accepted: UPI / Cards / Wallets / NetBanking"
+    "💳 *Payment Options*\n"
+    f"{_SEP}\n"
+    "Order confirm karne ke baad hum *Razorpay* payment link bhejte hain.\n\n"
+    "*Accepted:*\n"
+    "▪️ UPI (PhonePe / GPay / Paytm)\n"
+    "▪️ Credit / Debit Cards\n"
+    "▪️ Wallets / NetBanking\n\n"
+    "_(Cash on Delivery available nahi hai)_"
 )
-FAST_THANKS = "Welcome ji 🙏 Aur kuch chahiye to bataiye!"
+FAST_THANKS = "Welcome ji 🙏\n\nAur kuch chahiye to bataiye, hum yahan hain! 😊"
 
 
 def _format_catalog_reply(matches: list, query: str) -> str:
-    """Build a brand-grouped catalog reply WITHOUT calling AI. Used for simple item lookups."""
+    """Build a brand-grouped catalog reply WITHOUT calling AI. Used for simple item lookups.
+    Professional theme — no-discount items show plain MRP, big deals get 🔥 tag."""
     in_stock = [m for m in matches if m["stock"] > 0]
     if not in_stock:
-        return None  # let AI handle "out of stock" suggestions
+        return None
 
-    # Group by first word of name (usually brand). e.g. "AMUL BUTTER 100G" -> "AMUL"
+    # Group by first word of name (usually brand)
     by_brand = {}
-    for m in in_stock[:12]:  # cap at 12 to keep message readable
+    for m in in_stock[:12]:
         first = m["name"].split()[0]
         by_brand.setdefault(first, []).append(m)
 
-    lines = [f"*{query.title()} available* 🛒\n"]
+    lines = [f"🛒 *{query.title()} — Available Options*", "─" * 26]
     for brand, items in by_brand.items():
-        lines.append(f"\n*{brand}*")
+        lines.append(f"\n▪️ *{brand}*")
         for it in items:
-            disc = round((it["mrp"] - it["price"]) / it["mrp"] * 100) if it["mrp"] > 0 else 0
-            # show pack size from name (last token usually has size)
             label = " ".join(it["name"].split()[1:]) or it["name"]
-            disc_str = f" ({disc}% OFF)" if disc > 0 else ""
-            lines.append(f"• {label} — ~₹{it['mrp']:.0f}~ *₹{it['price']:.0f}*{disc_str}")
-    lines.append("\nKaunsa aur kitne packets chahiye?")
+            lines.append(f"   • {label}")
+            lines.append(f"      {format_price_label(it)}")
+    lines.append("")
+    lines.append("─" * 26)
+    lines.append("Kitne packets chahiye, aur kaunsa size? 😊")
     return "\n".join(lines)
 
 
@@ -1111,25 +1161,29 @@ def handle_grocery(phone_id, from_number, text):
     mode_label = "Self-Pickup" if is_pickup else "Home Delivery"
     mode_emoji = "🏪" if is_pickup else "🚚"
 
+    sep = "─" * 26
     if rzp_url:
         send_message(phone_id, from_number,
-            f"📋 Order ID: *{order_id}*\n"
-            f"{mode_emoji} {mode_label} — {schedule}\n"
-            f"💰 Total: *₹{amount:.0f}*\n\n"
-            f"💳 *Pay via Razorpay* 👇\n{rzp_url}\n\n"
-            f"_Accepted: UPI (PhonePe/GPay/Paytm), Cards, Wallets, NetBanking_\n\n"
-            f"✅ *Order auto-confirm ho jayega payment ke baad*\n\n"
-            f"Ya phir apne UPI app se pay karke *payment screenshot* yahan bhejiye — "
-            f"hum verify karke confirm kar denge.\n\n"
+            f"📋 *Order Confirmation*\n{sep}\n"
+            f"*Order ID:*  `{order_id}`\n"
+            f"*Mode:*      {mode_emoji} {mode_label}\n"
+            f"*Schedule:*  {schedule}\n"
+            f"*Total:*     *₹{amount:.0f}*\n"
+            f"{sep}\n\n"
+            f"💳 *Payment*\nTap to pay securely via Razorpay 👇\n{rzp_url}\n\n"
+            f"_Accepted: UPI (PhonePe / GPay / Paytm), Cards, Wallets, NetBanking_\n\n"
+            f"✅ Order auto-confirm ho jayega payment milte hi.\n"
+            f"_Ya UPI app se pay karke screenshot bhejein — bot verify kar lega._\n\n"
             f"📞 Help: 9729119167"
         )
     else:
-        # Razorpay temporarily down
         send_message(phone_id, from_number,
-            f"📋 Order ID: *{order_id}*\n"
-            f"{mode_emoji} {mode_label} — {schedule}\n"
-            f"💰 Total: *₹{amount:.0f}*\n\n"
-            f"⚠️ Payment system thoda busy hai, ek minute me dobara try kariye.\n\n"
+            f"📋 *Order Confirmation*\n{sep}\n"
+            f"*Order ID:* `{order_id}`\n"
+            f"*Mode:*     {mode_emoji} {mode_label}\n"
+            f"*Total:*    *₹{amount:.0f}*\n"
+            f"{sep}\n\n"
+            f"⚠️ Payment system busy hai, 1 minute me retry karein 🙏\n\n"
             f"📞 Help: 9729119167"
         )
     # No manager alert yet for either mode — wait for Razorpay webhook to fire

@@ -183,13 +183,30 @@ def search_catalog(query: str, limit: int = 30):
     return [item for _, item in scored[:limit]]
 
 
+def format_price_label(item: dict) -> str:
+    """Format price professionally: no-discount = direct MRP only, else strikethrough.
+    Highlights >=50% discounts with 🔥 BIG DEAL tag."""
+    mrp = item.get("mrp", 0) or 0
+    price = item.get("price", 0) or 0
+    if mrp <= 0 or abs(mrp - price) < 1:
+        return f"*₹{price:.0f}*"
+    discount = round((mrp - price) / mrp * 100)
+    if discount >= 50:
+        return f"~₹{mrp:.0f}~ *₹{price:.0f}* 🔥 *{discount}% OFF*"
+    elif discount > 0:
+        return f"~₹{mrp:.0f}~ *₹{price:.0f}* ({discount}% OFF)"
+    return f"*₹{price:.0f}*"
+
+
 def format_item_for_ai(item: dict) -> str:
     """Compact one-line representation passed to the AI."""
     discount = round((item["mrp"] - item["price"]) / item["mrp"] * 100) if item["mrp"] > 0 else 0
     stock_label = "in stock" if item["stock"] > 0 else "OUT OF STOCK"
+    no_disc_note = " | NO DISCOUNT" if discount <= 0 or abs(item["mrp"] - item["price"]) < 1 else ""
+    big_deal = " 🔥" if discount >= 50 else ""
     return (
         f"- {item['name']} | MRP ₹{item['mrp']:.0f} | 4U ₹{item['price']:.0f} "
-        f"({discount}% off) | {stock_label} ({item['stock']})"
+        f"({discount}% off){no_disc_note}{big_deal} | {stock_label} ({item['stock']})"
     )
 
 

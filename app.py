@@ -1600,19 +1600,13 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
                 )
             return True
 
-    # ── HELP COMMAND ──
-    if msg in ("help", "/help", "madad", "info"):
+    # ── HELP COMMAND (customer-side) — just the helpline ──
+    if msg in ("help", "/help", "madad", "info", "support", "contact"):
         send_message(phone_id, from_number,
-            f"🛟 *4U Grocery — How To Order*\n{sep}\n"
-            f"1️⃣ Item ka naam type karein (e.g. 'atta', 'butter', 'soap')\n"
-            f"2️⃣ Brand + quantity bhejein (e.g. 'Amul butter 100g 2 packets')\n"
-            f"3️⃣ Apna naam + Narnaul address share karein\n"
-            f"4️⃣ Razorpay link tap karke pay karein ✅\n\n"
-            f"*Quick commands:*\n"
-            f"▪️ `menu` — sab categories\n"
-            f"▪️ `deals` — best offers\n"
-            f"▪️ `4UG-XXXX` — order track\n\n"
-            f"📞 *Direct help:* 9729119167"
+            f"📞 *4U Grocery — Help*\n{sep}\n"
+            f"Direct call/WhatsApp:\n"
+            f"*9729119167*\n\n"
+            f"🕘 9 AM – 9 PM"
         )
         return True
 

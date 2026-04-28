@@ -65,11 +65,12 @@ RULES = [
     # MAGGI / NOODLES
     ("NOODLES", lambda n: _has_word(n, "MAGGI", "NOODLES", "PASTA", "MACARONI", "VERMICELLI", "SOOJI")),
 
-    # JUICE / SOFT DRINK / COLD
+    # REFRESHMENT — juice, soft drink, ready-to-drink beverages, refreshment mixes
     ("DRINK_COLD", lambda n: _has_word(n, "JUICE", "COKE", "PEPSI", "SPRITE", "FANTA", "MAAZA", "MIRINDA",
                                         "THUMS", "LIMCA", "LASSI", "SHAKE", "SHAKES", "KOOL", "FROOTI",
                                         "REAL", "TROPICANA", "B-FAST", "SODA")
-        or _has_substring(n, "ICED TEA", "COLD COFFEE")),
+        or _has_substring(n, "ICED TEA", "COLD COFFEE", "JEERA DRINK", "BADAM SHAKE",
+                          "BADAM MILK", "MILK SHAKE", "ROOH AFZA", "RASNA")),
 
     # WATER — strictly bottled drinking water. Excludes face washes/melons/etc.
     ("WATER", lambda n: (
@@ -77,9 +78,9 @@ RULES = [
         or _has_substring(n, "MINERAL WATER", "DRINKING WATER", "PACKAGED WATER")
     ) and not _has_word(n, "MELON", "GEL", "FACE", "WASH", "BODY", "HAIR")),
 
-    # DRINK_PANI — flavored drink mixes (Nimbu pani, Jal jeera) + pani-puri ingredients
+    # DRINK_PANI — pani-puri ingredients + jal-jeera powder/paste (NOT ready-to-drink jeera drinks)
     ("DRINK_PANI", lambda n: _has_substring(
-        n, "NIMBU PANI", "JAL JEERA", "JALJEERA", "JEERA DRINK", "PANI PURI", "GOL GAPPA",
+        n, "NIMBU PANI", "JAL JEERA", "JALJEERA", "PANI PURI", "GOL GAPPA",
         "SHIKANJI", "GLUCAN", "GLUCO", "ELECTORAL", "ELECTRAL", "ENERZAL", "GLUCON")),
 
     # ORAL_CARE — toothbrushes only when paired with dental keywords. Random "BRUSH" items don't qualify.

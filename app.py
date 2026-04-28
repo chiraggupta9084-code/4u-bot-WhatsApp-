@@ -979,19 +979,30 @@ def _format_catalog_reply(matches: list, query: str) -> str:
 
 def _instant_item_lookup(text: str, history) -> str | None:
     """If customer query is a simple item lookup with a recognised category,
-    format reply directly from catalog. Otherwise fall through to AI.
-
-    Conservative: requires a category match — prevents bot from substring-matching
-    random product names (e.g. 'Simple pani' was matching 'Simple ... Pencil')."""
+    format reply directly from catalog. Otherwise fall through to AI."""
     from catalog import _detect_category
     msg = (text or "").lower().strip()
-    if len(msg) > 50 or not msg:
+
+    # Skip noise / non-queries
+    if len(msg) < 2 or len(msg) > 50:
         return None
+    if msg in {"ok", "okay", "yes", "no", "haan", "nahi", "thik", "ji",
+               "k", "kk", "okk", "thanks", "ty", "thx", "?", "??", "...",
+               "abc", "test", "hmm", "..", "."}:
+        return None
+    # Pure punctuation/emoji
+    if not any(c.isalnum() for c in msg):
+        return None
+    # Intent queries handled by AI (price/discount/track etc.)
+    if any(t in msg for t in ["rate kya", "price kya", "kitne ka", "discount", "offer kya",
+                              "track", "cancel", "complaint"]):
+        return None
+
     word_count = len(msg.split())
     if word_count > 5:
         return None
     order_signals = ["address", "house", "ward", "narnaul", "naam", "name",
-                     "kg", "litre", "ltr", "packet", "pcs", "qty"]
+                     "mohalla", "near", "house no", "h.no"]
     if any(s in msg for s in order_signals):
         return None
     if len(history) >= 4:
@@ -1005,7 +1016,6 @@ def _instant_item_lookup(text: str, history) -> str | None:
     matches = search_catalog(text, limit=12)
     in_stock = [m for m in matches if m["stock"] > 0]
     if not in_stock:
-        # Category recognised but nothing in stock → let AI politely suggest alternatives
         return None
     return _format_catalog_reply(matches, text.strip())
 

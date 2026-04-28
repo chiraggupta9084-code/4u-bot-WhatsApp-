@@ -72,23 +72,30 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 def _build_provider_chain():
     """Multi-provider AI chain. Bot tries each in order; on rate-limit moves to next.
-    Add a key to the env var → provider auto-joins the chain. Order = priority."""
+    Order = priority: highest-quota providers first."""
     chain = []
 
-    # Groq (multiple keys for parallel quota)
-    for label, key in [("groq-1", GROQ_API_KEY), ("groq-2", GROQ_API_KEY_2), ("groq-3", GROQ_API_KEY_3)]:
-        if key:
-            chain.append({"name": label, "format": "openai", "url": GROQ_URL,
-                          "key": key, "model": GROQ_MODEL})
+    # 1. Mistral La Plateforme — 1 BILLION tokens/month, 500K TPM (huge quota)
+    mistral_key = os.environ.get("MISTRAL_API_KEY", "")
+    if mistral_key:
+        chain.append({"name": "mistral", "format": "openai",
+                      "url": "https://api.mistral.ai/v1/chat/completions",
+                      "key": mistral_key, "model": "mistral-small-latest"})
 
-    # Cerebras Cloud — free, very fast (OpenAI-compatible)
+    # 2. Cerebras Cloud — 1M tokens/day, fastest inference
     cerebras_key = os.environ.get("CEREBRAS_API_KEY", "")
     if cerebras_key:
         chain.append({"name": "cerebras", "format": "openai",
                       "url": "https://api.cerebras.ai/v1/chat/completions",
                       "key": cerebras_key, "model": "llama3.1-8b"})
 
-    # Together AI — generous free tier (OpenAI-compatible)
+    # 3. Groq (multiple keys for parallel quota)
+    for label, key in [("groq-1", GROQ_API_KEY), ("groq-2", GROQ_API_KEY_2), ("groq-3", GROQ_API_KEY_3)]:
+        if key:
+            chain.append({"name": label, "format": "openai", "url": GROQ_URL,
+                          "key": key, "model": GROQ_MODEL})
+
+    # 4. Together AI
     together_key = os.environ.get("TOGETHER_API_KEY", "")
     if together_key:
         chain.append({"name": "together", "format": "openai",
@@ -96,27 +103,20 @@ def _build_provider_chain():
                       "key": together_key,
                       "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"})
 
-    # Mistral La Plateforme — free tier (OpenAI-compatible)
-    mistral_key = os.environ.get("MISTRAL_API_KEY", "")
-    if mistral_key:
-        chain.append({"name": "mistral", "format": "openai",
-                      "url": "https://api.mistral.ai/v1/chat/completions",
-                      "key": mistral_key, "model": "mistral-small-latest"})
-
-    # OpenRouter — 27+ free models (OpenAI-compatible)
+    # 5. OpenRouter — 27+ free models
     if OPENROUTER_API_KEY:
         chain.append({"name": "openrouter", "format": "openai", "url": OPENROUTER_URL,
                       "key": OPENROUTER_API_KEY,
                       "model": "openai/gpt-oss-20b:free"})
 
-    # Cohere — free tier
+    # 6. Cohere
     cohere_key = os.environ.get("COHERE_API_KEY", "")
     if cohere_key:
         chain.append({"name": "cohere", "format": "openai",
                       "url": "https://api.cohere.com/compatibility/v1/chat/completions",
                       "key": cohere_key, "model": "command-r-08-2024"})
 
-    # Fireworks AI — free credits (OpenAI-compatible)
+    # 7. Fireworks AI
     fireworks_key = os.environ.get("FIREWORKS_API_KEY", "")
     if fireworks_key:
         chain.append({"name": "fireworks", "format": "openai",
@@ -124,7 +124,7 @@ def _build_provider_chain():
                       "key": fireworks_key,
                       "model": "accounts/fireworks/models/llama-v3p1-8b-instruct"})
 
-    # Gemini — final fallback (different API shape)
+    # 8. Gemini — final fallback (different API shape)
     if GEMINI_API_KEY:
         chain.append({"name": "gemini", "format": "gemini",
                       "url": GEMINI_URL, "key": GEMINI_API_KEY, "model": "gemini-2.0-flash"})

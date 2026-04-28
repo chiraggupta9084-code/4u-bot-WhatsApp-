@@ -983,8 +983,10 @@ def _fast_welcome():
     )
 
 
-# Backwards-compat alias (used in canned reply path)
-FAST_WELCOME = _fast_welcome()
+# Don't call _fast_welcome() at module load — festive_banner is defined later.
+# fast_canned_reply calls _fast_welcome() lazily so it always picks up
+# the current festive banner anyway.
+FAST_WELCOME = ""  # unused; kept only for backwards-compat imports
 FAST_HELP = (
     "📞 *4U Grocery — Customer Help*\n"
     f"{_SEP}\n"

@@ -1354,13 +1354,16 @@ def festive_banner() -> str:
 
 def handle_cancel_request(phone_id: str, from_number: str):
     sep = "─" * 26
+    # First try: explain policy, ask if it's pre-payment or post-payment
     send_message(phone_id, from_number,
         f"🚫 *Order Cancellation*\n{sep}\n"
-        f"Sorry ji, online order cancel nahi kar sakte 🙏\n\n"
-        f"*Exchange option:* Order receive ke baad agar problem hai, "
-        f"store par aake exchange kar sakte hain.\n\n"
-        f"📞 *For help:* 9729119167\n"
-        f"_Manager se direct baat kar lijiye._"
+        f"Cancellation policy:\n"
+        f"▪️ *Payment se pehle* (Razorpay link tap karne se pehle) → bus type karein "
+        f"`new order` aur naya order start kar sakte hain\n"
+        f"▪️ *Payment hone ke baad* → online cancel possible nahi hai, lekin "
+        f"item receive ke baad store par exchange kar sakte hain\n\n"
+        f"Apna *order ID* batayein (4UG-XXXX) — hum status check karke best help karenge.\n\n"
+        f"_Direct manager se baat:_ type karein *manager*"
     )
 
 
@@ -1600,20 +1603,36 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
                 )
             return True
 
-    # ── HELP COMMAND (customer-side) — auto-silence bot, alert manager, give call number ──
+    # ── HELP COMMAND — bot tries to solve first, only escalates if asked ──
     if msg in ("help", "/help", "madad", "info", "support", "contact"):
+        send_message(phone_id, from_number,
+            f"🙏 Bataiye, kya help chahiye?\n\n"
+            f"▪️ *Order place* karna hai? — item naam + quantity bhejiye\n"
+            f"▪️ *Order track* karna hai? — order ID type karein (e.g. 4UG-1234)\n"
+            f"▪️ *Cancel/refund* — order ID + reason bhejiye\n"
+            f"▪️ *Item search* — bus item ka naam type karein\n"
+            f"▪️ *Categories* dekhne ke liye type karein: `menu`\n"
+            f"▪️ *Best deals* dekhne ke liye type karein: `deals`\n\n"
+            f"_Manager se baat karne ke liye type karein:_ *manager*"
+        )
+        return True
+
+    # ── EXPLICIT ESCALATION TO MANAGER (only when customer specifically asks) ──
+    HUMAN_TRIGGERS = ("manager", "talk to human", "real person", "actual person",
+                       "owner", "shopkeeper", "human se", "manager se baat",
+                       "manager chahiye", "real human", "live agent")
+    if any(t in msg for t in HUMAN_TRIGGERS) and len(msg) < 50:
         send_message(phone_id, from_number,
             f"🙏 Manager aapse turant contact karenge.\n\n"
             f"📞 Direct call: *9729119167*\n"
-            f"🕘 9 AM – 9 PM"
+            f"_Ya yahin WhatsApp pe wait kariye — manager 5 min me reply karenge._"
         )
-        # Auto-takeover so manager replies through bot
         SILENCED_CUSTOMERS.add(from_number)
         send_message(phone_id, GROCERY_MANAGER_NUMBER,
-            f"🛟 *Customer needs help*\n{sep}\n"
-            f"+{from_number} typed 'help' — bot silenced.\n"
-            f"_Reply via:_ `/reply {from_number} <message>`\n"
-            f"_Bot wapas chalu:_ `/bot {from_number}`"
+            f"🛟 *Customer wants manager*\n{sep}\n"
+            f"+{from_number} ne 'manager' poocha — bot silenced.\n"
+            f"_Reply:_ `/reply {from_number} <message>`\n"
+            f"_Resume bot:_ `/bot {from_number}`"
         )
         return True
 
@@ -1711,15 +1730,18 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
         )
         return True
 
-    # ── UNHAPPY CUSTOMER → warm + manager number ──
+    # ── UNHAPPY CUSTOMER → bot apologises sincerely first, asks what's wrong ──
     if _matches_any(msg, UNHAPPY_TRIGGERS):
         send_message(phone_id, from_number,
-            f"🙏 Aapko inconvenience hua, hum dil se sorry hain.\n{sep}\n"
-            f"Manager personally aapki problem solve karenge:\n"
-            f"📞 *9729119167*\n"
-            f"_Aapka feedback humein behtar banata hai._ ❤️"
+            f"🙏 Aapko taqleef hui, hum dil se sorry hain.\n{sep}\n"
+            f"Please mujhe specific batayein:\n"
+            f"▪️ Order ID (4UG-XXXX)?\n"
+            f"▪️ Exact issue kya hai? (late delivery / galat saman / damaged / behaviour / kuch aur)\n\n"
+            f"Hum turant solve karne ki koshish karenge ❤️\n\n"
+            f"_Manager se direct baat karne ke liye type karein:_ *manager*"
         )
-        log_failure(from_number, text, "unhappy customer", notify_manager=True)
+        # Still alert manager in background — they should know there's an unhappy customer
+        log_failure(from_number, text, "unhappy customer — bot trying first", notify_manager=True)
         return True
 
     if is_cancel_request(text):
@@ -1727,22 +1749,29 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
         return True
 
     if _matches_any(msg, REFUND_TRIGGERS):
+        # First try: explain policy + ask for order details so bot can route correctly
         send_message(phone_id, from_number,
-            f"💰 *Refund Request*\n{sep}\n"
-            f"Refund/return ke liye direct manager se baat kariye 🙏\n\n"
-            f"📞 *Call/WhatsApp:* 9729119167\n"
-            f"_Aapka issue manager personally handle karenge._"
+            f"💰 *Refund Policy*\n{sep}\n"
+            f"▪️ *Wrong / damaged item* → exchange ya refund possible hai\n"
+            f"▪️ *Already delivered* → store par exchange kar lo, ya manager refund process karenge\n"
+            f"▪️ *Order not received* → track ya manager se confirm karwao\n\n"
+            f"Apna *order ID (4UG-XXXX)* aur *issue* batayein, hum solve karte hain.\n\n"
+            f"_Direct manager chahiye? Type karein:_ *manager*"
         )
+        log_failure(from_number, text, "refund query — bot trying to handle", notify_manager=False)
         return True
 
     if _matches_any(msg, COMPLAINT_TRIGGERS):
+        # First try: get details, see if bot can resolve via tracking/info
         send_message(phone_id, from_number,
-            f"🛟 *Complaint / Issue*\n{sep}\n"
-            f"Sorry for inconvenience 🙏\n\n"
-            f"Please call manager directly:\n"
-            f"📞 *9729119167*\n\n"
-            f"_Order details aur issue clearly batayein, hum jaldi solve karenge._"
+            f"🛟 *Sorry ji* — kya issue hua?\n{sep}\n"
+            f"Mujhe ye batayein:\n"
+            f"1️⃣ Aapka *order ID* (4UG-XXXX)?\n"
+            f"2️⃣ Issue kya hai? (galat saman / damaged / late delivery / kuch aur)\n\n"
+            f"Hum check karke turant solve karne ki koshish karenge 🙏\n\n"
+            f"_Direct manager se baat karne ke liye:_ *manager*"
         )
+        log_failure(from_number, text, "complaint — bot gathering details", notify_manager=False)
         return True
 
     if _matches_any(msg, RECEIPT_TRIGGERS):

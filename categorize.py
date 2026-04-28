@@ -37,10 +37,17 @@ RULES = [
     # ICE CREAM — before CHOCOLATE, before CREAM
     ("ICE_CREAM", lambda n: _has_substring(n, "ICE CREAM", "ICECREAM", "KULFI") or n.startswith("VADILAL ")),
 
-    # BISCUIT / COOKIE
-    ("BISCUIT", lambda n: _has_word(n, "BISCUIT", "BISCUITS", "BIKIS", "COOKIE", "COOKIES", "KRACK", "MARIE", "RUSK")
-        or _has_substring(n, "GOOD DAY", "PARLE G", "PARLE-G", "BOURBON", "TIGER GLUCOSE", "MILANO", "JIM JAM",
-                          "HIDE & SEEK", "TREAT JIM", "BR ", "AMERICANA BISCUIT", "AMERICANA BOON")),
+    # BISCUIT / COOKIE — must come before BUTTER (Butter Bite/Sticks/Jeera are biscuits, not dairy)
+    ("BISCUIT", lambda n: _has_word(n, "BISCUIT", "BISCUITS", "BIKIS", "COOKIE", "COOKIES",
+                                      "KRACK", "MARIE", "RUSK")
+        or n.startswith(("MCVITIES ", "PRIYAGOLD ", "BRITANNIA ", "PARLE ", "BRITANIA "))
+        or _has_substring(n, "GOOD DAY", "PARLE G", "PARLE-G", "BOURBON", "TIGER GLUCOSE", "MILANO",
+                          "JIM JAM", "HIDE & SEEK", "TREAT JIM", "BR ", "AMERICANA BISCUIT",
+                          "AMERICANA BOON", "BUTTER STICKS", "BUTTER BITE", "BUTTER JEERA",
+                          "BUTTER COOKIE", "BUTTER COOKIES", "KARTAR BUTTER")),
+
+    # MAKHANA (foxnut snacks) — NOT butter
+    ("NAMKEEN_CHIPS_MAKHANA", lambda n: _has_word(n, "MAKHANA", "MAKHAANE", "FOXNUT", "FOX NUT")),
 
     # CHOCOLATE — before DAIRY (DAIRY MILK is chocolate)
     ("CHOCOLATE", lambda n: _has_word(n, "CHOCOLATE", "CHOCO", "CHOCS", "CHOCOMINIS", "KITKAT", "ECLAIRS", "CADBURY",
@@ -118,9 +125,10 @@ RULES = [
     # GHEE
     ("GHEE", lambda n: _has_word(n, "GHEE")),
 
-    # BUTTER — POPCORN/BISCUIT/CHOCOLATE already excluded above
-    ("BUTTER", lambda n: _has_word(n, "BUTTER", "MAKHAN", "MAKHANA")
-        and not _has_word(n, "BADAM", "PEANUT")  # nut-butters categorized separately
+    # BUTTER — pure dairy butter only. Biscuits and makhanas filtered out above.
+    ("BUTTER", lambda n: _has_word(n, "BUTTER", "MAKHAN")
+        and not _has_word(n, "BADAM", "PEANUT")
+        and not _has_substring(n, "STICKS", "BITE", "COOKIE", "JEERA")  # biscuit shapes
         ),
 
     ("CHEESE", lambda n: _has_word(n, "CHEESE")),

@@ -1362,13 +1362,17 @@ def handle_grocery(phone_id, from_number, text):
             send_message(phone_id, from_number,
                 f"🌙 *4U Grocery — Closed Now*\n{sep}\n"
                 f"Hum abhi band hain 🙏\n"
-                f"🕘 Open: *9 AM – 9 PM*\n\n"
-                f"Aap apna order *abhi place* kar sakte hain — hum kal subah 9 baje "
-                f"se delivery start kar denge.\n\n"
+                f"🕘 Open: *9 AM – 9 PM*\n"
+                f"{sep}\n\n"
+                f"📅 *Kal ke liye order schedule kar sakte hain!*\n\n"
+                f"Bataiye:\n"
+                f"▪️ Kya items chahiye?\n"
+                f"▪️ Kal *kis time* delivery chahiye? (e.g. 10 AM, 12 PM, 3 PM)\n\n"
+                f"Hum aapka order kal us time pe deliver kar denge ✅\n\n"
                 f"📞 Urgent: 9729119167"
             )
             LAST_OUT_OF_HOURS_NOTIFY[from_number] = time.time()
-        # Continue processing — customer can still place a scheduled order
+        # Continue processing — customer can place a scheduled order in next message
 
     # 🚫 SPAM PROTECTION — same customer >8 messages in 30 sec
     if _is_spamming(from_number):
@@ -1889,11 +1893,25 @@ def handle_customer_image(phone_id: str, from_number: str, media_id: str):
             return
         paid = float(parsed.get("amount") or 0)
         expected = pending["amount"]
-        if paid + 1 < expected:
+        # Strict: any mismatch (under OR over) → redirect to Razorpay, don't accept partial
+        if abs(paid - expected) > 1:
+            sep = "─" * 26
+            # Re-issue Razorpay link
+            new_url, new_link_id = create_razorpay_link(
+                pending["order_id"], expected, from_number
+            )
+            if new_url and new_link_id:
+                PENDING_ORDERS[new_link_id] = pending
             send_message(phone_id, from_number,
-                f"📋 Order *{pending['order_id']}*\n\n"
-                f"Aapne ₹{paid:.0f} bheja, lekin total ₹{expected:.0f}.\n"
-                f"Please ₹{expected - paid:.0f} aur bhejein 🙏"
+                f"⚠️ *Payment mismatch*\n{sep}\n"
+                f"*Order:*    `{pending['order_id']}`\n"
+                f"*Expected:* ₹{expected:.0f}\n"
+                f"*Received:* ₹{paid:.0f}\n"
+                f"{sep}\n\n"
+                f"Please *exact ₹{expected:.0f}* pay kariye Razorpay link se 👇\n"
+                + (f"{new_url}\n\n" if new_url else "")
+                + "_Razorpay automatically correct amount calculate karta hai._\n\n"
+                f"📞 Help: 9729119167"
             )
             return
         notify_paid_order(pending, paid_amount=paid,

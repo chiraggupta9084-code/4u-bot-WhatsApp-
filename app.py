@@ -1600,13 +1600,20 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
                 )
             return True
 
-    # ── HELP COMMAND (customer-side) — just the helpline ──
+    # ── HELP COMMAND (customer-side) — auto-silence bot, alert manager, give call number ──
     if msg in ("help", "/help", "madad", "info", "support", "contact"):
         send_message(phone_id, from_number,
-            f"📞 *4U Grocery — Help*\n{sep}\n"
-            f"Direct call/WhatsApp:\n"
-            f"*9729119167*\n\n"
+            f"🙏 Manager aapse turant contact karenge.\n\n"
+            f"📞 Direct call: *9729119167*\n"
             f"🕘 9 AM – 9 PM"
+        )
+        # Auto-takeover so manager replies through bot
+        SILENCED_CUSTOMERS.add(from_number)
+        send_message(phone_id, GROCERY_MANAGER_NUMBER,
+            f"🛟 *Customer needs help*\n{sep}\n"
+            f"+{from_number} typed 'help' — bot silenced.\n"
+            f"_Reply via:_ `/reply {from_number} <message>`\n"
+            f"_Bot wapas chalu:_ `/bot {from_number}`"
         )
         return True
 

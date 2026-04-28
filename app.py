@@ -1096,8 +1096,49 @@ def fast_canned_reply(text: str, history) -> str | None:
     return None
 
 
+CUSTOMER_RATE_LIMIT = defaultdict(list)  # phone -> list of recent timestamps
+LAST_OUT_OF_HOURS_NOTIFY = {}  # phone -> ts of last out-of-hours auto-reply
+
+
+def _is_out_of_hours() -> bool:
+    """Return True if store is closed (before 9 AM or after 9 PM IST)."""
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    return now_ist.hour < 9 or now_ist.hour >= 21
+
+
+def _is_spamming(from_number: str) -> bool:
+    """Customer sent >8 messages in last 30 seconds → throttle."""
+    now = time.time()
+    timestamps = CUSTOMER_RATE_LIMIT[from_number]
+    # Drop old entries
+    timestamps[:] = [t for t in timestamps if now - t < 30]
+    timestamps.append(now)
+    return len(timestamps) > 8
+
+
 def handle_grocery(phone_id, from_number, text):
     history = GROCERY_HISTORY[from_number]
+
+    # ⏰ OUT OF HOURS — 9 PM to 9 AM IST: auto-reply with closed message (once per 30 min)
+    if _is_out_of_hours():
+        last = LAST_OUT_OF_HOURS_NOTIFY.get(from_number, 0)
+        if time.time() - last > 1800:  # 30 min cooldown per customer
+            sep = "─" * 26
+            send_message(phone_id, from_number,
+                f"🌙 *4U Grocery — Closed*\n{sep}\n"
+                f"Hum abhi band hain 🙏\n"
+                f"🕘 Store hours: *9 AM – 9 PM*\n\n"
+                f"Aapka message note kar liya — kal subah 9 baje ke baad reply mil jayega.\n\n"
+                f"📞 Urgent: 9729119167"
+            )
+            LAST_OUT_OF_HOURS_NOTIFY[from_number] = time.time()
+        return  # don't process orders out of hours
+
+    # 🚫 SPAM PROTECTION — same customer >8 messages in 30 sec
+    if _is_spamming(from_number):
+        # Stay silent — don't reply to every spam message, save quota
+        print(f"Spam throttle: {from_number}")
+        return
 
     # 0️⃣ REPEAT ORDER — customer asks to redo last order
     if is_repeat_request(text):

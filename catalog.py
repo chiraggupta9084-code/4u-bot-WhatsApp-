@@ -19,6 +19,18 @@ _DATA_PATH = os.path.join(_HERE, "catalog_data.json")
 with open(_DATA_PATH) as f:
     CATALOG = json.load(f)
 
+# Data sanity pass — protect against Marg-export errors
+for _it in CATALOG:
+    # Stock < 0 → treat as 0 (data error from Marg)
+    if _it.get("stock", 0) < 0:
+        _it["stock"] = 0
+    # Sale price > MRP → treat as MRP (no fake "negative discount")
+    if _it.get("price", 0) > _it.get("mrp", 0) > 0:
+        _it["price"] = _it["mrp"]
+    # MRP missing → use sale price
+    if _it.get("mrp", 0) <= 0 and _it.get("price", 0) > 0:
+        _it["mrp"] = _it["price"]
+
 
 # Hindi/Hinglish synonyms — appended to query during matching
 SYNONYMS = {

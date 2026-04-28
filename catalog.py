@@ -158,11 +158,25 @@ QUERY_TO_CATEGORY = {
 }
 
 
+# Phrases that LOOK like category keywords but mean something else.
+# Returning None pushes the query to AI, which sees the actual catalog matches
+# and answers correctly (e.g. 'butter paper' → parchment, not butter).
+SHADOW_PHRASES = {
+    "butter paper", "foil paper", "silver paper", "wax paper",
+    "tissue paper", "kitchen paper", "cling film", "cling wrap",
+    "ice tray", "ice box",            # don't map to ice cream
+    "milk powder",                    # special category if needed
+    "egg tray", "egg shell",
+}
+
+
 def _detect_category(query: str) -> str | None:
     """If query mentions a known category keyword, return its category code.
-    Uses longest-match-first so multi-word keys like 'ice cream' beat 'cream'."""
-    q = (query or "").lower()
-    # Sort keys by length descending — longest specific phrase wins
+    Uses longest-match-first so multi-word keys like 'ice cream' beat 'cream'.
+    Returns None for shadow phrases so they bypass category routing → AI handles."""
+    q = (query or "").lower().strip()
+    if any(p in q for p in SHADOW_PHRASES):
+        return None
     for word, cat in sorted(QUERY_TO_CATEGORY.items(), key=lambda x: -len(x[0])):
         if f" {word} " in f" {q} " or q == word or q.startswith(word + " ") or q.endswith(" " + word):
             return cat

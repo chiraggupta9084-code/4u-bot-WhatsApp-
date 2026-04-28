@@ -943,6 +943,7 @@ def groq_grocery_reply(from_number, text):
         return result
     except Exception as e:
         print(f"AI chain exhausted: {e}")
+        log_failure(from_number, text, f"AI chain exhausted: {str(e)[:80]}", notify_manager=False)
         if history and history[-1].get("role") == "user":
             history.pop()
         return {
@@ -967,10 +968,12 @@ ai_grocery_reply = groq_grocery_reply
 _SEP = "─" * 26
 
 def _fast_welcome():
-    """Welcome message with optional festive banner."""
+    """Welcome with time-based greeting + optional festive banner."""
     banner = festive_banner()
     banner_line = f"\n{banner}\n" if banner else "\n"
+    greeting = _greeting_by_time()
     return (
+        f"{greeting}\n"
         "🛒 *4U Grocery* — Welcome!\n"
         f"{_SEP}\n"
         "🕘 *Hours:* 9 AM – 9 PM\n"
@@ -979,7 +982,8 @@ def _fast_welcome():
         "💳 *Payment:* UPI / Card / Wallet\n"
         f"{_SEP}"
         f"{banner_line}\n"
-        "Bataiye, aaj kya chahiye? 😊"
+        "Bataiye, aaj kya chahiye? 😊\n"
+        "_(`menu` ya `deals` type karein for quick options)_"
     )
 
 
@@ -1235,6 +1239,42 @@ def _is_spamming(from_number: str) -> bool:
     return len(timestamps) > 8
 
 
+UNHAPPY_TRIGGERS = ("ghatiya", "bekar", "bakwas", "kharab service", "third class",
+                     "useless", "worst", "very bad service", "horrible", "ghatya")
+
+# Failure log — recorded for daily digest + immediate manager forward in serious cases
+FAILED_QUERIES = []  # list of dicts: {ts, customer, message, reason}
+
+CUSTOMER_NAMES = {}  # phone -> name (session memory)
+
+
+def remember_customer_name(phone: str, name: str):
+    if name and len(name) <= 30:
+        CUSTOMER_NAMES[phone] = name.strip().title()
+
+
+def log_failure(customer_phone: str, customer_msg: str, reason: str, notify_manager: bool = False):
+    """Track issues bot couldn't handle. If serious, forward to manager immediately."""
+    entry = {
+        "ts": datetime.utcnow().isoformat(),
+        "customer": customer_phone,
+        "message": customer_msg[:200],
+        "reason": reason,
+    }
+    FAILED_QUERIES.append(entry)
+    if len(FAILED_QUERIES) > 200:
+        FAILED_QUERIES.pop(0)
+    if notify_manager:
+        sep = "─" * 26
+        send_message(GROCERY_PHONE_ID, GROCERY_MANAGER_NUMBER,
+            f"🛟 *Bot needs help*\n{sep}\n"
+            f"Customer: +{customer_phone}\n"
+            f"Asked: \"{customer_msg[:120]}\"\n"
+            f"Issue: {reason}\n{sep}\n"
+            f"Please reply to customer directly: +{customer_phone}"
+        )
+
+
 CANCEL_TRIGGERS = ("cancel", "cancle", "cancell", "rad kar do", "hata do",
                     "nahi karna", "order cancel", "remove order")
 REFUND_TRIGGERS = ("refund", "paisa wapas", "paise wapas", "return karna",
@@ -1330,11 +1370,193 @@ def handle_track_order(phone_id: str, from_number: str, order_id: str):
 ORDER_ID_RE = re.compile(r"\b4UG[\s-]?(\d{3,5})\b", re.IGNORECASE)
 
 
+def _greeting_by_time() -> str:
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    h = now_ist.hour
+    if h < 12:
+        return "Good morning ji 🌞"
+    if h < 17:
+        return "Namaste ji 🙏"
+    return "Good evening 🌆"
+
+
+def _today_top_offers(limit: int = 8):
+    """Pull highest-discount in-stock items for the deals command."""
+    from catalog import CATALOG
+    scored = []
+    for it in CATALOG:
+        if it["stock"] <= 0 or it["mrp"] <= 0:
+            continue
+        d = (it["mrp"] - it["price"]) / it["mrp"]
+        if d < 0.20:  # only show real deals (≥20%)
+            continue
+        scored.append((d, it))
+    scored.sort(key=lambda x: -x[0])
+    return [it for _, it in scored[:limit]]
+
+
 def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> bool:
-    """Handle cancel / refund / complaint / receipt / identity / order-tracking
-    before entering normal flow. Returns True if handled."""
+    """Handle cancel / refund / complaint / receipt / identity / order-tracking /
+    menu / deals / help / unhappy customer / manager admin commands."""
     msg = (text or "").lower().strip()
     sep = "─" * 26
+
+    # ── MANAGER ADMIN COMMANDS (only from manager number) ──
+    if from_number == GROCERY_MANAGER_NUMBER.lstrip("9").lstrip("1") or \
+       from_number == GROCERY_MANAGER_NUMBER:
+        if msg.startswith("/issues"):
+            if not FAILED_QUERIES:
+                send_message(phone_id, from_number, "✅ Koi issues nahi — sab smooth hai!")
+            else:
+                lines = ["🛟 *Recent issues bot couldn't solve:*"]
+                for q in FAILED_QUERIES[-10:]:
+                    when = q["ts"][:16].replace("T", " ")
+                    lines.append(f"• {when} +{q['customer']}: \"{q['message'][:60]}\" — {q['reason']}")
+                send_message(phone_id, from_number, "\n".join(lines))
+            return True
+
+        if msg in ("/help", "/admin", "/?"):
+            send_message(phone_id, from_number,
+                "🛠️ *Manager admin commands:*\n"
+                "▪️ `/issues` — last 10 unsolved customer queries\n"
+                "▪️ `/orders` — today's order count + revenue so far\n"
+                "▪️ `/deals` — top discount items today"
+            )
+            return True
+
+        if msg.startswith("/orders"):
+            if not ORDERS_TODAY:
+                send_message(phone_id, from_number, "🛒 Aaj abhi tak koi paid order nahi.")
+            else:
+                total = sum(o["amount"] for o in ORDERS_TODAY)
+                send_message(phone_id, from_number,
+                    f"📊 *Today so far*\n{sep}\n"
+                    f"Orders: {len(ORDERS_TODAY)}\n"
+                    f"Revenue: ₹{total:.0f}\n"
+                    f"Avg: ₹{total/len(ORDERS_TODAY):.0f}"
+                )
+            return True
+
+    # ── HELP COMMAND ──
+    if msg in ("help", "/help", "madad", "info"):
+        send_message(phone_id, from_number,
+            f"🛟 *4U Grocery — How To Order*\n{sep}\n"
+            f"1️⃣ Item ka naam type karein (e.g. 'atta', 'butter', 'soap')\n"
+            f"2️⃣ Brand + quantity bhejein (e.g. 'Amul butter 100g 2 packets')\n"
+            f"3️⃣ Apna naam + Narnaul address share karein\n"
+            f"4️⃣ Razorpay link tap karke pay karein ✅\n\n"
+            f"*Quick commands:*\n"
+            f"▪️ `menu` — sab categories\n"
+            f"▪️ `deals` — best offers\n"
+            f"▪️ `4UG-XXXX` — order track\n\n"
+            f"📞 *Direct help:* 9729119167"
+        )
+        return True
+
+    # ── MENU / CATEGORIES COMMAND ──
+    if msg in ("menu", "menus", "/menu", "list", "categories", "items list", "kya kya hai"):
+        send_message(phone_id, from_number,
+            f"🛒 *4U Grocery — Categories*\n{sep}\n"
+            f"🥛 *Dairy:* milk, butter, ghee, paneer, dahi, cheese\n"
+            f"🌾 *Grains:* atta, rice, dal, besan, maida\n"
+            f"🌶️ *Masala:* haldi, mirch, jeera, garam masala\n"
+            f"🧂 *Salt/Sugar:* namak, cheeni, gud, honey\n"
+            f"🛢️ *Oil:* refined, mustard, sunflower\n"
+            f"🍪 *Snacks:* biscuit, namkeen, chips, popcorn\n"
+            f"🍫 *Sweets:* chocolate, ice cream, candy\n"
+            f"🥤 *Drinks:* juice, cold drink, tea, coffee\n"
+            f"🍞 *Bakery:* bread, bun, cake\n"
+            f"🧼 *Personal Care:* soap, shampoo, toothpaste\n"
+            f"🧹 *Cleaning:* detergent, harpic, lizol\n"
+            f"👶 *Baby:* diaper, baby food, wipes\n"
+            f"🪔 *Pooja:* agarbatti, dhoop, kapoor\n"
+            f"📚 *Other:* stationery, hygiene, toy\n"
+            f"{sep}\n"
+            f"Bus item type karein, hum saari brands aur prices dikha denge! 😊"
+        )
+        return True
+
+    # ── DEALS COMMAND ──
+    if msg in ("deals", "deal", "offer", "offers", "discount", "today's deals", "best price",
+               "sasta", "cheap"):
+        offers = _today_top_offers(8)
+        if not offers:
+            send_message(phone_id, from_number,
+                f"🎁 *Today's Offers*\n{sep}\n"
+                f"Aaj koi special deal nahi hai.\n"
+                f"Item type karein, hum normal best price dikha denge!"
+            )
+        else:
+            lines = [f"🔥 *Today's Best Deals*", sep]
+            for o in offers:
+                d = round((o["mrp"] - o["price"]) / o["mrp"] * 100)
+                lines.append(f"• {o['name']}")
+                lines.append(f"   ~₹{o['mrp']:.0f}~ *₹{o['price']:.0f}* ({d}% OFF)")
+            lines.append(sep)
+            lines.append("Order karne ke liye item ka naam aur quantity bhejein! 😊")
+            send_message(phone_id, from_number, "\n".join(lines))
+        return True
+
+    # ── BUDGET / RECIPE BUNDLES (semantic — pass to AI) ──
+    if any(p in msg for p in ["essential", "essentials", "monthly grocery", "weekly",
+                              "monthly", "raashan", "samaan kya kya"]):
+        send_message(phone_id, from_number,
+            f"📋 *Monthly Essentials*\n{sep}\n"
+            f"Common ghar ke liye:\n"
+            f"▪️ Atta 5/10 kg\n"
+            f"▪️ Sugar 1-2 kg\n"
+            f"▪️ Tel 1L\n"
+            f"▪️ Salt 1 kg\n"
+            f"▪️ Dal 1-2 kg (moong/masoor/chana)\n"
+            f"▪️ Chai/Coffee\n"
+            f"▪️ Soap, shampoo, detergent\n"
+            f"▪️ Toothpaste, oral care\n"
+            f"{sep}\n"
+            f"Apna budget batayein (e.g. ₹500, ₹1000, ₹2000) — hum aapke liye best mix bana denge! 💼"
+        )
+        return True
+
+    if any(p in msg for p in ["puja saman", "pooja saman", "pooja samagri", "puja samagri",
+                              "puja ka saman", "pooja ka saman"]):
+        send_message(phone_id, from_number,
+            f"🪔 *Pooja Samagri*\n{sep}\n"
+            f"▪️ Agarbatti / dhoop\n"
+            f"▪️ Kapoor / camphor\n"
+            f"▪️ Diya / deepak\n"
+            f"▪️ Match box\n"
+            f"▪️ Ganga jal\n"
+            f"▪️ Kalava (mauli)\n"
+            f"▪️ Coconut, supari\n"
+            f"{sep}\n"
+            f"Specific items batayein, hum brands + prices dikha denge! 😊"
+        )
+        return True
+
+    if any(p in msg for p in ["biriyani", "biryani", "biryaani", "puri", "halwa",
+                              "khichdi", "biryani saman"]):
+        send_message(phone_id, from_number,
+            f"🍛 *Recipe Special*\n{sep}\n"
+            f"Aap recipe bana rahe hain — humare paas saare ingredients mil jayenge:\n"
+            f"▪️ Rice / atta / besan\n"
+            f"▪️ Dal / besan\n"
+            f"▪️ Masala (garam masala, haldi, mirch, jeera)\n"
+            f"▪️ Tel / ghee\n"
+            f"▪️ Salt / sugar\n"
+            f"{sep}\n"
+            f"Recipe batayein ya items list karein, hum directly cart bana denge!"
+        )
+        return True
+
+    # ── UNHAPPY CUSTOMER → warm + manager number ──
+    if _matches_any(msg, UNHAPPY_TRIGGERS):
+        send_message(phone_id, from_number,
+            f"🙏 Aapko inconvenience hua, hum dil se sorry hain.\n{sep}\n"
+            f"Manager personally aapki problem solve karenge:\n"
+            f"📞 *9729119167*\n"
+            f"_Aapka feedback humein behtar banata hai._ ❤️"
+        )
+        log_failure(from_number, text, "unhappy customer", notify_manager=True)
+        return True
 
     if is_cancel_request(text):
         handle_cancel_request(phone_id, from_number)
@@ -1761,8 +1983,10 @@ def daily_summary_endpoint():
             f"📊 *4U Grocery — Daily Summary*\n"
             f"📅 {now_ist.strftime('%d %b %Y')}\n\n"
             f"Aaj koi paid order nahi aaya 😔\n\n"
-            f"📞 Help: 9729119167"
         )
+        if FAILED_QUERIES:
+            msg += f"⚠️ *{len(FAILED_QUERIES)} customer queries* couldn't be handled — type `/issues` for details\n\n"
+        msg += "📞 Help: 9729119167"
     else:
         total = sum(o["amount"] for o in ORDERS_TODAY)
         n = len(ORDERS_TODAY)
@@ -1784,6 +2008,8 @@ def daily_summary_endpoint():
             msg += f"• {o['order_id']} — ₹{o['amount']:.0f} {mode}\n"
         if n > 10:
             msg += f"... +{n-10} more\n"
+        if FAILED_QUERIES:
+            msg += f"\n⚠️ *{len(FAILED_QUERIES)} unsolved customer queries* today — type `/issues`\n"
         msg += f"\nDhanyavaad! 🙏"
 
     send_message(GROCERY_PHONE_ID, GROCERY_MANAGER_NUMBER, msg)

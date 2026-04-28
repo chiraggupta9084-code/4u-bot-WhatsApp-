@@ -235,6 +235,62 @@ QUERY_TO_CATEGORY = {
 # Phrases that LOOK like category keywords but mean something else.
 # Returning None pushes the query to AI, which sees the actual catalog matches
 # and answers correctly (e.g. 'butter paper' → parchment, not butter).
+# Common brand misspellings → canonical brand name
+BRAND_TYPO_FIX = {
+    "amool": "amul", "amol": "amul", "amul ka": "amul",
+    "kadbury": "cadbury", "kadberry": "cadbury", "cad bury": "cadbury",
+    "ashirvad": "aashirvaad", "ascurvad": "aashirvaad", "ashirwad": "aashirvaad",
+    "britania": "britannia", "britnia": "britannia",
+    "nestley": "nestle", "nesle": "nestle",
+    "kit kat": "kitkat", "kit-kat": "kitkat",
+    "dair milk": "dairy milk", "dary milk": "dairy milk",
+    "good-day": "good day", "goodday": "good day",
+    "parle-g": "parle g", "parleg": "parle g",
+    "magic": "maggi", "magii": "maggi", "magi": "maggi",
+    "lays chip": "lays", "leys": "lays",
+    "kurkur": "kurkure", "kurkur e": "kurkure",
+    "harpic": "harpic", "harpik": "harpic",
+    "viim": "vim", "vimm": "vim",
+    "lifebouy": "lifebuoy", "life buoy": "lifebuoy",
+    "kollgate": "colgate", "colgate ka": "colgate",
+    "pepsident": "pepsodent", "pepsodint": "pepsodent",
+    "fortuna": "fortune", "fortune oil": "fortune",
+    "saafola": "saffola", "saffolla": "saffola",
+    "addilal": "vadilal", "vidilal": "vadilal",
+    "biscut": "biscuit", "biskut": "biscuit", "biskit": "biscuit",
+    "shampu": "shampoo", "shampo": "shampoo",
+}
+
+
+# Hindi number words → digit
+HINDI_NUMBERS = {
+    "ek": "1", "do": "2", "teen": "3", "char": "4", "chaar": "4",
+    "paanch": "5", "panch": "5", "che": "6", "chh": "6",
+    "saat": "7", "saath": "7", "aath": "8", "nau": "9", "naw": "9",
+    "das": "10", "dus": "10", "gyaarah": "11", "barah": "12", "bara": "12",
+    "ek dum": "1", "ek packet": "1 packet",
+    "do packet": "2 packets", "do kg": "2 kg",
+    "ek kg": "1 kg", "aadha kg": "0.5 kg", "aadha": "0.5",
+    "paav kg": "0.25 kg", "paav": "0.25",
+    "dher saara": "10",
+}
+
+
+def normalize_query(text: str) -> str:
+    """Apply brand-typo fixes + Hindi number translation BEFORE any matching."""
+    if not text:
+        return text
+    t = text.lower()
+    # Brand typos (longest first to avoid partial matches)
+    for typo, fix in sorted(BRAND_TYPO_FIX.items(), key=lambda x: -len(x[0])):
+        t = t.replace(typo, fix)
+    # Hindi numbers (whole-word match)
+    import re as _re
+    for word, digit in sorted(HINDI_NUMBERS.items(), key=lambda x: -len(x[0])):
+        t = _re.sub(r'\b' + _re.escape(word) + r'\b', digit, t)
+    return t
+
+
 SHADOW_PHRASES = {
     "butter paper", "foil paper", "silver paper", "wax paper",
     "tissue paper", "kitchen paper", "cling film", "cling wrap",
@@ -257,8 +313,8 @@ def _detect_category(query: str) -> str | None:
     return None
 
 
-def search_catalog(query: str, limit: int = 30):
-    """Return matching items for a customer query.
+def search_catalog_raw(query: str, limit: int = 30):
+    """Original search (no normalization). Used internally.
 
     Two-stage:
       1. If query mentions a known category keyword (butter/popcorn/chocolate/etc.),
@@ -350,6 +406,11 @@ def top_offers(limit: int = 3, min_discount: int = 25):
         scored.append((discount, item))
     scored.sort(key=lambda x: -x[0])
     return [item for _, item in scored[:limit]]
+
+
+def search_catalog(query: str, limit: int = 30):
+    """Public search — normalizes query (brand typos + Hindi numbers) first."""
+    return search_catalog_raw(normalize_query(query), limit=limit)
 
 
 # Catalog stats for runtime sanity

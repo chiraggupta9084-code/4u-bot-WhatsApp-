@@ -172,6 +172,36 @@ PENDING_BY_CUSTOMER = {}
 ORDERS_TODAY = []
 LAST_SUMMARY_DATE = ""
 
+# Customer history (last order, total spend, order count) — for repeat orders + loyalty
+CUSTOMER_DATA_FILE = "/tmp/4u_customer_data.json"
+LOYALTY_ENABLED = False  # ⚠️ feature flag — flip to True to activate loyalty rewards
+LOYALTY_THRESHOLDS = [
+    # (cumulative_spend_₹, reward_₹)
+    (2000, 50),
+    (5000, 150),
+    (10000, 400),
+    (25000, 1200),
+]
+
+
+def _load_customer_data():
+    try:
+        with open(CUSTOMER_DATA_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_customer_data():
+    try:
+        with open(CUSTOMER_DATA_FILE, "w") as f:
+            json.dump(CUSTOMER_DATA, f)
+    except Exception as e:
+        print(f"customer save error: {e}")
+
+
+CUSTOMER_DATA = _load_customer_data()
+
 FASHION_PHONE_ID = "1045539971979577"
 GROCERY_PHONE_ID = "1120135307844620"
 GROCERY_MANAGER_NUMBER = "918708666760"
@@ -570,7 +600,7 @@ def handle_payment_screenshot(phone_id: str, from_number: str, media_id: str):
 
 
 def _record_paid_order(pending: dict, paid_amount: float):
-    """Append a confirmed order to today's log for the daily summary."""
+    """Append a confirmed order to today's log AND update customer history."""
     ORDERS_TODAY.append({
         "order_id": pending["order_id"],
         "amount": paid_amount,
@@ -580,11 +610,102 @@ def _record_paid_order(pending: dict, paid_amount: float):
         "schedule": pending.get("schedule", ""),
         "ts": datetime.utcnow().isoformat(),
     })
+    # Update customer profile (for repeat orders + loyalty)
+    phone = pending["customer_phone"]
+    data = CUSTOMER_DATA.setdefault(phone, {
+        "total_spend": 0.0, "order_count": 0,
+        "last_order": None, "loyalty_awarded_at": 0,
+    })
+    data["last_order"] = {
+        "order_id": pending["order_id"],
+        "summary": pending.get("summary", ""),
+        "amount": paid_amount,
+        "is_pickup": pending.get("is_pickup", False),
+        "ts": datetime.utcnow().isoformat(),
+    }
+    data["total_spend"] = round(data.get("total_spend", 0) + paid_amount, 2)
+    data["order_count"] = data.get("order_count", 0) + 1
+    _save_customer_data()
+
+
+def check_loyalty_reward(phone: str):
+    """Returns reward ₹ if customer just crossed a loyalty threshold; else None.
+    No-ops when LOYALTY_ENABLED is False."""
+    if not LOYALTY_ENABLED:
+        return None
+    data = CUSTOMER_DATA.get(phone)
+    if not data:
+        return None
+    total = data.get("total_spend", 0)
+    awarded_at = data.get("loyalty_awarded_at", 0)
+    for threshold, reward in LOYALTY_THRESHOLDS:
+        if total >= threshold and awarded_at < threshold:
+            data["loyalty_awarded_at"] = threshold
+            _save_customer_data()
+            return {"threshold": threshold, "reward": reward}
+    return None
+
+
+REPEAT_TRIGGERS = (
+    "phir wahi", "wahi order", "same order", "same as last", "fir se",
+    "phir se wahi", "repeat order", "wahi cheez", "wahi item",
+)
+
+
+def is_repeat_request(text: str) -> bool:
+    msg = (text or "").lower().strip()
+    if msg in {"same", "wahi", "repeat", "phir wahi", "fir se"}:
+        return True
+    return any(t in msg for t in REPEAT_TRIGGERS)
+
+
+def handle_repeat_order(phone_id: str, from_number: str):
+    """Customer asked for repeat — pull last order, prompt for confirmation."""
+    data = CUSTOMER_DATA.get(from_number)
+    last = data.get("last_order") if data else None
+    if not last:
+        send_message(phone_id, from_number,
+            "Aapka koi past order nahi mila 🙏\n\n"
+            "Naya order karne ke liye items aur quantity bhejiye!\n"
+            "📞 Help: 9729119167"
+        )
+        return
+
+    summary = last.get("summary", "").strip()
+    amount = last.get("amount", 0)
+    when = last.get("ts", "")[:10]
+
+    msg = (
+        f"🛒 *Aapka pichla order ({when}):*\n\n"
+        f"{summary}\n\n"
+        f"💰 Last total: ₹{amount:.0f}\n\n"
+        f"_Wahi items dobara order karne ke liye:_\n"
+        f"✅ Apna *naam + Narnaul address* bhejiye, hum repeat order set kar denge\n\n"
+        f"_Ya kuch alag chahiye to seedha bata dijiye_ 😊\n"
+        f"📞 Help: 9729119167"
+    )
+    send_message(phone_id, from_number, msg)
+
+    # Seed history so the AI uses this cart context when address arrives
+    history = GROCERY_HISTORY[from_number]
+    history.append({"role": "user", "parts": [{"text": "[Repeat order request]"}]})
+    history.append({"role": "model", "parts": [{"text":
+        f"Customer wants to repeat their previous order: {summary} (₹{amount:.0f}). "
+        f"Wait for them to share name + address, then complete the order with these items."
+    }]})
 
 
 def notify_paid_order(pending: dict, paid_amount: float, utr: str, payee: str, source: str):
     """Send paid-confirmation to customer + manager. Used by Razorpay webhook AND screenshot OCR."""
     _record_paid_order(pending, paid_amount)
+    reward = check_loyalty_reward(pending["customer_phone"])  # None unless flag enabled
+    if reward:
+        send_message(pending["phone_id"], pending["customer_phone"],
+            f"🎁 *Loyalty Reward Unlocked!*\n\n"
+            f"₹{reward['threshold']:,} cumulative spend reached — "
+            f"aapko *₹{reward['reward']} off* ka credit mil gaya!\n\n"
+            f"Next order me apply hoga automatically 💝"
+        )
     # Customer
     send_message(pending["phone_id"], pending["customer_phone"],
         f"✅ *Payment Confirmed* — ₹{paid_amount:.0f} received 🎉\n"
@@ -906,6 +1027,11 @@ def fast_canned_reply(text: str, history) -> str | None:
 
 def handle_grocery(phone_id, from_number, text):
     history = GROCERY_HISTORY[from_number]
+
+    # 0️⃣ REPEAT ORDER — customer asks to redo last order
+    if is_repeat_request(text):
+        handle_repeat_order(phone_id, from_number)
+        return
 
     # 1️⃣ FASTEST PATH: trivial canned (greetings, hours, help) — no AI, no catalog search
     canned = fast_canned_reply(text, history)

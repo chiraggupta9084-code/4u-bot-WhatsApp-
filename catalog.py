@@ -85,7 +85,9 @@ QUERY_TO_CATEGORY = {
     "nimbu pani": "DRINK_PANI", "jal jeera": "DRINK_PANI", "panipuri": "DRINK_PANI",
     "glucan": "DRINK_PANI", "electoral": "DRINK_PANI", "electral": "DRINK_PANI",
     "chocolate": "CHOCOLATE", "choco": "CHOCOLATE", "cadbury": "CHOCOLATE",
-    "ice": "ICE_CREAM", "icecream": "ICE_CREAM", "kulfi": "ICE_CREAM",
+    "ice cream": "ICE_CREAM", "ice-cream": "ICE_CREAM", "icecream": "ICE_CREAM",
+    "ice": "ICE_CREAM", "kulfi": "ICE_CREAM", "cone": "ICE_CREAM", "softy": "ICE_CREAM",
+    "sundae": "ICE_CREAM", "candy": "ICE_CREAM", "chocobar": "ICE_CREAM",
     "biscuit": "BISCUIT", "cookie": "BISCUIT", "rusk": "BISCUIT",
     "namkeen": "NAMKEEN_CHIPS", "chips": "NAMKEEN_CHIPS", "snack": "NAMKEEN_CHIPS",
     "kurkure": "NAMKEEN_CHIPS", "bhujia": "NAMKEEN_CHIPS",
@@ -121,10 +123,11 @@ QUERY_TO_CATEGORY = {
 
 
 def _detect_category(query: str) -> str | None:
-    """If query mentions a known category keyword, return its category code."""
+    """If query mentions a known category keyword, return its category code.
+    Uses longest-match-first so multi-word keys like 'ice cream' beat 'cream'."""
     q = (query or "").lower()
-    for word, cat in QUERY_TO_CATEGORY.items():
-        # word boundary check
+    # Sort keys by length descending — longest specific phrase wins
+    for word, cat in sorted(QUERY_TO_CATEGORY.items(), key=lambda x: -len(x[0])):
         if f" {word} " in f" {q} " or q == word or q.startswith(word + " ") or q.endswith(" " + word):
             return cat
     return None

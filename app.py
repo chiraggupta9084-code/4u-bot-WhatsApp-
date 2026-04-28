@@ -785,6 +785,7 @@ def handle_repeat_order(phone_id: str, from_number: str):
 def notify_paid_order(pending: dict, paid_amount: float, utr: str, payee: str, source: str):
     """Send paid-confirmation to customer + manager. Used by Razorpay webhook AND screenshot OCR."""
     _record_paid_order(pending, paid_amount)
+    _clear_pending(pending["customer_phone"])  # cart no longer "abandoned"
     reward = check_loyalty_reward(pending["customer_phone"])  # None unless flag enabled
     if reward:
         send_message(pending["phone_id"], pending["customer_phone"],
@@ -1244,8 +1245,35 @@ UNHAPPY_TRIGGERS = ("ghatiya", "bekar", "bakwas", "kharab service", "third class
 
 # Failure log — recorded for daily digest + immediate manager forward in serious cases
 FAILED_QUERIES = []  # list of dicts: {ts, customer, message, reason}
+NOT_IN_STOCK_QUERIES = []  # list of {ts, customer, item} — items asked for but not in catalog
+ACTIVITY_LOG = []  # rolling log of recent customer messages (for /last and /customers)
+PENDING_CARTS = {}  # phone -> {ts, last_msg, items_so_far} — for abandonment alerts
 
 CUSTOMER_NAMES = {}  # phone -> name (session memory)
+
+
+def _log_activity(phone: str, msg: str, bot_reply: str):
+    """Keep rolling log of last 200 customer interactions for manager drill-down."""
+    ACTIVITY_LOG.append({
+        "ts": datetime.utcnow().isoformat(),
+        "customer": phone,
+        "message": msg[:200],
+        "reply": bot_reply[:200],
+    })
+    if len(ACTIVITY_LOG) > 200:
+        ACTIVITY_LOG.pop(0)
+
+
+def _track_pending(phone: str, last_msg: str):
+    """Mark this customer as having an in-progress (unpaid) cart."""
+    PENDING_CARTS[phone] = {
+        "ts": time.time(),
+        "last_msg": last_msg[:120],
+    }
+
+
+def _clear_pending(phone: str):
+    PENDING_CARTS.pop(phone, None)
 
 
 def remember_customer_name(phone: str, name: str):
@@ -1404,6 +1432,75 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
     # ── MANAGER ADMIN COMMANDS (only from manager number) ──
     if from_number == GROCERY_MANAGER_NUMBER.lstrip("9").lstrip("1") or \
        from_number == GROCERY_MANAGER_NUMBER:
+
+        # /last <phone> — show recent chat with that customer
+        if msg.startswith("/last"):
+            parts = msg.split()
+            if len(parts) >= 2:
+                target = parts[1].lstrip("+").lstrip("0")
+                if not target.startswith("91") and len(target) == 10:
+                    target = "91" + target
+                relevant = [a for a in ACTIVITY_LOG if a["customer"] == target][-8:]
+                if not relevant:
+                    send_message(phone_id, from_number,
+                        f"📭 Koi activity nahi mili +{target} ke saath.")
+                else:
+                    lines = [f"💬 *Last messages with +{target}:*", sep]
+                    for a in relevant:
+                        when = a["ts"][11:16]
+                        lines.append(f"\n🕒 {when}")
+                        lines.append(f"👤 {a['message'][:80]}")
+                        lines.append(f"🤖 {a['reply'][:80]}")
+                    send_message(phone_id, from_number, "\n".join(lines))
+            else:
+                send_message(phone_id, from_number, "Usage: `/last 9876543210`")
+            return True
+
+        # /customers — list of customers who chatted today
+        if msg.startswith("/customers"):
+            now = datetime.utcnow()
+            today_phones = list({a["customer"] for a in ACTIVITY_LOG
+                                 if datetime.fromisoformat(a["ts"]).date() == now.date()})
+            if not today_phones:
+                send_message(phone_id, from_number, "📭 Aaj koi customer nahi aaya.")
+            else:
+                lines = [f"👥 *Today's customers* ({len(today_phones)}):", sep]
+                for p in today_phones[-20:]:
+                    name = CUSTOMER_NAMES.get(p, "")
+                    lines.append(f"• +{p}" + (f" ({name})" if name else ""))
+                lines.append(sep)
+                lines.append("_Type `/last <phone>` to see chat with anyone._")
+                send_message(phone_id, from_number, "\n".join(lines))
+            return True
+
+        # /pending — carts that started but didn't pay
+        if msg.startswith("/pending"):
+            if not PENDING_CARTS:
+                send_message(phone_id, from_number, "✅ Sab clear — koi pending cart nahi.")
+            else:
+                lines = [f"⏳ *Pending carts* ({len(PENDING_CARTS)}):", sep]
+                for ph, p in PENDING_CARTS.items():
+                    age = int((time.time() - p["ts"]) / 60)
+                    lines.append(f"• +{ph} — {age} min ago: \"{p['last_msg'][:60]}\"")
+                send_message(phone_id, from_number, "\n".join(lines))
+            return True
+
+        # /missing — items customers asked for but not in catalog (potential new SKUs)
+        if msg.startswith("/missing"):
+            if not NOT_IN_STOCK_QUERIES:
+                send_message(phone_id, from_number,
+                    "✅ Customers ne sab kuch maange jo humare paas hai!")
+            else:
+                from collections import Counter
+                items = Counter(q["item"] for q in NOT_IN_STOCK_QUERIES)
+                lines = [f"📦 *Items asked but NOT in catalog:*", sep]
+                for item, n in items.most_common(15):
+                    lines.append(f"• {item} ({n}× asked)")
+                lines.append(sep)
+                lines.append("_Consider stocking these in Marg._")
+                send_message(phone_id, from_number, "\n".join(lines))
+            return True
+
         if msg.startswith("/issues"):
             if not FAILED_QUERIES:
                 send_message(phone_id, from_number, "✅ Koi issues nahi — sab smooth hai!")
@@ -1418,9 +1515,13 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
         if msg in ("/help", "/admin", "/?"):
             send_message(phone_id, from_number,
                 "🛠️ *Manager admin commands:*\n"
-                "▪️ `/issues` — last 10 unsolved customer queries\n"
-                "▪️ `/orders` — today's order count + revenue so far\n"
-                "▪️ `/deals` — top discount items today"
+                "▪️ `/orders` — today's count + revenue\n"
+                "▪️ `/customers` — today's customers list\n"
+                "▪️ `/last <phone>` — recent chat with that customer\n"
+                "▪️ `/pending` — carts started but unpaid\n"
+                "▪️ `/issues` — unsolved customer queries\n"
+                "▪️ `/missing` — items asked for but not in catalog\n"
+                "▪️ `/deals` — top discount items"
             )
             return True
 
@@ -1610,9 +1711,13 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
 def handle_grocery(phone_id, from_number, text):
     history = GROCERY_HISTORY[from_number]
 
-    # 🚫 CANCEL / 📋 ORDER TRACKING — handled instantly
+    # 🚫 CANCEL / 📋 ORDER TRACKING / admin commands — handled instantly
     if maybe_handle_special_intent(phone_id, from_number, text):
+        _log_activity(from_number, text, "[admin/intent command]")
         return
+
+    # Track this customer as having an active conversation (cart-in-progress)
+    _track_pending(from_number, text)
 
     # ⏰ OUT OF HOURS — show closed banner + ALLOW scheduled orders for next-day window
     if _is_out_of_hours():
@@ -1651,6 +1756,7 @@ def handle_grocery(phone_id, from_number, text):
         history.append({"role": "user", "parts": [{"text": text}]})
         history.append({"role": "model", "parts": [{"text": canned}]})
         send_message(phone_id, from_number, canned)
+        _log_activity(from_number, text, canned)
         print(f"FAST canned for: {text[:40]}")
         return
 
@@ -1660,6 +1766,7 @@ def handle_grocery(phone_id, from_number, text):
         history.append({"role": "user", "parts": [{"text": text}]})
         history.append({"role": "model", "parts": [{"text": catalog_reply}]})
         send_message(phone_id, from_number, catalog_reply)
+        _log_activity(from_number, text, catalog_reply)
         print(f"CATALOG instant for: {text[:40]}")
         return
 
@@ -1680,6 +1787,19 @@ def handle_grocery(phone_id, from_number, text):
     # Cache successful AI response on first-message queries (helps repeat customers)
     if cache_key and not result["order_complete"] and result["reply"]:
         _cache_put(cache_key, result)
+
+    _log_activity(from_number, text, result["reply"])
+
+    # If AI's reply suggests we don't have the item, log for SKU planning
+    if any(p in result["reply"].lower() for p in ["abhi nahi hai", "available nahi hai",
+                                                   "nahi mila", "stock me nahi"]):
+        NOT_IN_STOCK_QUERIES.append({
+            "ts": datetime.utcnow().isoformat(),
+            "customer": from_number,
+            "item": text[:80],
+        })
+        if len(NOT_IN_STOCK_QUERIES) > 200:
+            NOT_IN_STOCK_QUERIES.pop(0)
     send_message(phone_id, from_number, result["reply"])
 
     if not result["order_complete"] or not result["order_summary"]:
@@ -1957,6 +2077,74 @@ def refresh_token_endpoint():
         "old_days_left": round(days_left, 1),
         "redeploy": "triggered",
     })
+
+
+# ─── ABANDONMENT ALERT + HEARTBEAT ─────────────────
+@app.route("/abandon-check", methods=["GET"])
+def abandon_check():
+    """Find carts older than 30 min with no payment, alert manager once.
+    Ping this every 30-60 min via UptimeRobot."""
+    if request.args.get("secret") != REFRESH_SECRET:
+        return jsonify({"error": "forbidden"}), 403
+    now = time.time()
+    notified = []
+    for phone, p in list(PENDING_CARTS.items()):
+        age_min = (now - p["ts"]) / 60
+        if 30 < age_min < 180 and not p.get("notified"):  # alert once per cart
+            sep = "─" * 26
+            send_message(GROCERY_PHONE_ID, GROCERY_MANAGER_NUMBER,
+                f"⏳ *Cart abandoned*\n{sep}\n"
+                f"Customer: +{phone}\n"
+                f"Stuck {int(age_min)} min — last said: \"{p['last_msg'][:80]}\"\n"
+                f"_Customer ne kuch poocha tha but order finalize nahi kiya._\n\n"
+                f"Manager, follow up kariye: +{phone}"
+            )
+            p["notified"] = True
+            notified.append(phone)
+        elif age_min > 180:
+            PENDING_CARTS.pop(phone, None)  # too old — drop
+    return jsonify({"alerts_sent": len(notified), "carts_open": len(PENDING_CARTS)})
+
+
+@app.route("/heartbeat", methods=["GET"])
+def heartbeat():
+    """Periodic status update to manager. Ping every 4 hours via UptimeRobot.
+    Only sends during business hours (9 AM – 9 PM IST)."""
+    if request.args.get("secret") != REFRESH_SECRET:
+        return jsonify({"error": "forbidden"}), 403
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    if not (9 <= now_ist.hour < 21):
+        return jsonify({"status": "skip", "reason": "out of business hours"})
+
+    # Activity in last 4 hours
+    cutoff = now_ist - timedelta(hours=4)
+    recent_msgs = sum(1 for a in ACTIVITY_LOG
+                      if datetime.fromisoformat(a["ts"]) + timedelta(hours=5, minutes=30) >= cutoff)
+    recent_orders = [o for o in ORDERS_TODAY
+                     if datetime.fromisoformat(o["ts"]) + timedelta(hours=5, minutes=30) >= cutoff]
+    revenue = sum(o["amount"] for o in recent_orders)
+    issues = sum(1 for q in FAILED_QUERIES
+                 if datetime.fromisoformat(q["ts"]) + timedelta(hours=5, minutes=30) >= cutoff)
+
+    # Skip if zero activity (don't spam manager)
+    if recent_msgs == 0 and not recent_orders:
+        return jsonify({"status": "skip", "reason": "no activity"})
+
+    sep = "─" * 26
+    msg = (
+        f"📡 *4U Grocery — Live Status*\n{sep}\n"
+        f"Last 4 hours:\n"
+        f"💬 Messages:  {recent_msgs}\n"
+        f"🛒 Orders:    {len(recent_orders)}\n"
+        f"💰 Revenue:   ₹{revenue:.0f}\n"
+        f"⏳ Pending carts: {len(PENDING_CARTS)}\n"
+        f"⚠️ Issues:    {issues}\n"
+        f"{sep}\n"
+        f"⏰ {now_ist.strftime('%I:%M %p, %d %b')}\n"
+        f"_Type `/help` for admin commands._"
+    )
+    send_message(GROCERY_PHONE_ID, GROCERY_MANAGER_NUMBER, msg)
+    return jsonify({"status": "sent"})
 
 
 # ─── DAILY ORDER SUMMARY ───────────────────────────

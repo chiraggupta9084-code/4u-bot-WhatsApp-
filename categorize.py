@@ -28,11 +28,11 @@ def _has_substring(name: str, *fragments) -> bool:
 
 
 RULES = [
-    # POPCORN — must come before BUTTER (contains "BUTTER")
+    # POPCORN — must come before BUTTER (contains "BUTTER"). Excludes biscuits-with-"pops".
     ("POPCORN", lambda n: (
         n.startswith(("ACT II ", "ACT-II ", "ACTII ", "AMERICANA FLICK ", "4700BC "))
         or _has_word(n, "POPCORN", "POPS")
-    )),
+    ) and not _has_word(n, "BISCUIT", "BISCUITS", "COOKIE", "COOKIES")),
 
     # ICE CREAM — before CHOCOLATE, before CREAM
     ("ICE_CREAM", lambda n: _has_substring(n, "ICE CREAM", "ICECREAM", "KULFI") or n.startswith("VADILAL ")),
@@ -79,7 +79,7 @@ RULES = [
 
     # DRINK_PANI — flavored drink mixes (Nimbu pani, Jal jeera) + pani-puri ingredients
     ("DRINK_PANI", lambda n: _has_substring(
-        n, "NIMBU PANI", "JAL JEERA", "JALJEERA", "PANI PURI", "GOL GAPPA",
+        n, "NIMBU PANI", "JAL JEERA", "JALJEERA", "JEERA DRINK", "PANI PURI", "GOL GAPPA",
         "SHIKANJI", "GLUCAN", "GLUCO", "ELECTORAL", "ELECTRAL", "ENERZAL", "GLUCON")),
 
     # ORAL_CARE — toothbrushes only when paired with dental keywords. Random "BRUSH" items don't qualify.
@@ -109,7 +109,8 @@ RULES = [
 
     ("HAIR_CARE", lambda n: _has_word(n, "SHAMPOO", "CONDITIONER")
         or _has_substring(n, "HEAD & SHOULDER", "HEAD AND SHOULDER", "SUNSILK", "PANTENE",
-                          "TRESEMME", "CLINIC PLUS", "DABUR AMLA", "PARACHUTE", "HAIR OIL")),
+                          "TRESEMME", "CLINIC PLUS", "DABUR AMLA", "PARACHUTE", "HAIR OIL",
+                          "HAIR&CARE", "HAIR & CARE", "HAIR-CARE")),
 
     ("COSMETIC", lambda n: _has_word(n, "LAKME", "FACEWASH", "LOTION", "MOTRISER", "MOISTURISER",
                                        "MOISTURIZER", "FAIRNESS", "POND", "PONDS", "GARNIER",
@@ -138,11 +139,13 @@ RULES = [
         or _has_substring(n, "AMUL FRESH CREAM", "AMUL DAHI", "MOTHER DAIRY", "AMUL TAAZA",
                           "AMUL GOLD", "AMUL KOOL", "TONED MILK", "FULL CREAM MILK")),
 
-    # SPICES
-    ("SPICE", lambda n: _has_word(n, "HALDI", "MIRCH", "JEERA", "DHANIYA", "MASALA", "GARAM", "HING",
-                                    "ELAICHI", "LAUNG", "DALCHINI", "KESAR", "SAUNF", "AJWAIN",
-                                    "METHI", "SARSON", "AMCHUR", "KALIMIRCH", "KALONJI", "SABAT")
-        or _has_substring(n, "PAV BHAJI", "CHAT MASALA", "CHAAT MASALA")),
+    # SPICES — exclude obviously-not-spice items (drinks, biscuits, soaps)
+    ("SPICE", lambda n: (
+        _has_word(n, "HALDI", "MIRCH", "JEERA", "DHANIYA", "MASALA", "GARAM", "HING",
+                     "ELAICHI", "LAUNG", "DALCHINI", "KESAR", "SAUNF", "AJWAIN",
+                     "METHI", "SARSON", "AMCHUR", "KALIMIRCH", "KALONJI", "SABAT")
+        or _has_substring(n, "PAV BHAJI", "CHAT MASALA", "CHAAT MASALA")
+    ) and not _has_word(n, "DRINK", "JUICE", "SOAP", "BISCUIT", "BISCUITS", "COOKIE")),
 
     # SALT
     ("SALT", lambda n: _has_word(n, "SALT", "NAMAK", "TATA")),

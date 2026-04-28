@@ -927,24 +927,34 @@ def _format_catalog_reply(matches: list, query: str) -> str:
 
 
 def _instant_item_lookup(text: str, history) -> str | None:
-    """If customer query is a simple item lookup (1-4 words, no address/qty/order context)
-    AND catalog has matches → format reply directly, skip AI entirely."""
+    """If customer query is a simple item lookup with a recognised category,
+    format reply directly from catalog. Otherwise fall through to AI.
+
+    Conservative: requires a category match — prevents bot from substring-matching
+    random product names (e.g. 'Simple pani' was matching 'Simple ... Pencil')."""
+    from catalog import _detect_category
     msg = (text or "").lower().strip()
-    if len(msg) > 50:  # too complex
+    if len(msg) > 50 or not msg:
         return None
     word_count = len(msg.split())
-    if word_count > 5 or word_count < 1:
+    if word_count > 5:
         return None
-    # If it's a clear order/address message, let AI handle
     order_signals = ["address", "house", "ward", "narnaul", "naam", "name",
                      "kg", "litre", "ltr", "packet", "pcs", "qty"]
     if any(s in msg for s in order_signals):
         return None
-    # Skip if conversation already has 3+ turns (we're mid-order)
     if len(history) >= 4:
         return None
+
+    # MUST have a recognised category — prevents random substring matches
+    cat = _detect_category(text)
+    if not cat:
+        return None
+
     matches = search_catalog(text, limit=12)
-    if not matches:
+    in_stock = [m for m in matches if m["stock"] > 0]
+    if not in_stock:
+        # Category recognised but nothing in stock → let AI politely suggest alternatives
         return None
     return _format_catalog_reply(matches, text.strip())
 

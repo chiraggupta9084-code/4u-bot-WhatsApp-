@@ -64,8 +64,32 @@ RULES = [
                                         "REAL", "TROPICANA", "B-FAST", "SODA")
         or _has_substring(n, "ICED TEA", "COLD COFFEE")),
 
-    # WATER
-    ("WATER", lambda n: _has_word(n, "WATER", "BISLERI", "AQUAFINA", "KINLEY")),
+    # WATER — strictly bottled drinking water. Excludes face washes/melons/etc.
+    ("WATER", lambda n: (
+        _has_word(n, "BISLERI", "AQUAFINA", "KINLEY", "BAILLEY", "OXYRICH", "HIMALAYAN")
+        or _has_substring(n, "MINERAL WATER", "DRINKING WATER", "PACKAGED WATER")
+    ) and not _has_word(n, "MELON", "GEL", "FACE", "WASH", "BODY", "HAIR")),
+
+    # DRINK_PANI — flavored drink mixes (Nimbu pani, Jal jeera) + pani-puri ingredients
+    ("DRINK_PANI", lambda n: _has_substring(
+        n, "NIMBU PANI", "JAL JEERA", "JALJEERA", "PANI PURI", "GOL GAPPA",
+        "SHIKANJI", "GLUCAN", "GLUCO", "ELECTORAL", "ELECTRAL", "ENERZAL", "GLUCON")),
+
+    # ORAL_CARE — toothbrushes only when paired with dental keywords. Random "BRUSH" items don't qualify.
+    ("ORAL_CARE", lambda n: _has_word(n, "TOOTHPASTE", "MANJAN", "COLGATE",
+                                          "PEPSODENT", "CLOSEUP", "SENSODYNE", "DABUR RED",
+                                          "LISTERINE", "MOUTHWASH")
+        or _has_substring(n, "TOOTH BRUSH", "TOOTHBRUSH", "TONGUE CLEAN", "ORAL-B", "ORAL B",
+                          "DENTAL", "MOUTH WASH")),
+
+    # ART/PAINT BRUSHES → STATIONERY
+    ("STATIONERY_BRUSH", lambda n: _has_word(n, "BRUSH") and _has_word(
+        n, "PEN", "PAINT", "ART", "DRAWING", "DOMS", "OPERA",
+        "WATERCOLOR", "BRW", "FLAIR", "MICKEY", "CREATIVE", "COLOUR", "COLOR")),
+
+    # TOILET / SHOE / OTHER CLEANING BRUSHES
+    ("CLEANING_BRUSH", lambda n: _has_word(n, "BRUSH") and _has_word(
+        n, "TOILET", "BOSS", "SHOE", "BOOTS", "SHAVE")),
 
     # TEA / COFFEE
     ("TEA_COFFEE", lambda n: _has_word(n, "TEA", "COFFEE", "BRU", "NESCAFE", "TAJ", "TAAZA",
@@ -141,9 +165,8 @@ RULES = [
         or _has_substring(n, "HEAD & SHOULDER", "HEAD AND SHOULDER", "SUNSILK", "PANTENE",
                           "TRESEMME", "CLINIC PLUS", "DABUR AMLA", "PARACHUTE")),
 
-    # TOOTHPASTE / ORAL
-    ("ORAL_CARE", lambda n: _has_word(n, "TOOTHPASTE", "TOOTH", "MANJAN", "COLGATE", "PEPSODENT", "CLOSEUP",
-                                        "SENSODYNE", "DABUR RED", "LISTERINE", "MOUTHWASH", "BRUSH")),
+    # (ORAL_CARE rule already declared earlier — removed duplicate that was
+    #  miscategorising any item containing "BRUSH")
 
     # DETERGENT
     ("DETERGENT", lambda n: _has_word(n, "DETERGENT", "WASH", "SURF", "TIDE", "ARIEL", "GHADI", "WHEEL",

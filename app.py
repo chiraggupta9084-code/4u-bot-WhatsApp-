@@ -456,7 +456,8 @@ VISUAL STYLE for replies (professional):
 - Separator: ─────────── between sections
 - Brand groups marked with ▪️
 - Items with • bullet, indented
-- Always end with a clear question to customer
+- ALWAYS end with: "Kaunsa *brand* aur *kitne packets* chahiye? 😊"
+  (always ask both brand AND quantity — never just one)
 
 UPSELL: If subtotal close to next delivery tier (₹100-199, ₹300-399, ₹400-499), nudge once: "Add ₹X more for cheaper/free delivery."
 
@@ -972,7 +973,7 @@ def _format_catalog_reply(matches: list, query: str) -> str:
             lines.append(f"      {format_price_label(it)}")
     lines.append("")
     lines.append("─" * 26)
-    lines.append("Kitne packets chahiye, aur kaunsa size? 😊")
+    lines.append("Kaunsa *brand* aur *kitne packets* chahiye? 😊")
     return "\n".join(lines)
 
 

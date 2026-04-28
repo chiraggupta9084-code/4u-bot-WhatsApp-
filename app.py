@@ -86,7 +86,7 @@ def _build_provider_chain():
     if cerebras_key:
         chain.append({"name": "cerebras", "format": "openai",
                       "url": "https://api.cerebras.ai/v1/chat/completions",
-                      "key": cerebras_key, "model": "llama-3.3-70b"})
+                      "key": cerebras_key, "model": "llama3.1-8b"})
 
     # Together AI — generous free tier (OpenAI-compatible)
     together_key = os.environ.get("TOGETHER_API_KEY", "")

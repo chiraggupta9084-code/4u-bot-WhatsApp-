@@ -7,7 +7,8 @@ import io
 import time
 import base64
 import urllib.parse
-from collections import defaultdict, deque
+from collections import defaultdict, deque, Counter
+from datetime import datetime, timedelta
 
 
 def retry(times: int = 3, base_delay: float = 0.8):
@@ -166,6 +167,10 @@ razorpay_enabled = bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
 PENDING_ORDERS = {}
 # Maps: customer_phone -> latest pending order (for screenshot-based confirmation)
 PENDING_BY_CUSTOMER = {}
+
+# Daily order log — populated by notify_paid_order, drained by /daily-summary
+ORDERS_TODAY = []
+LAST_SUMMARY_DATE = ""
 
 FASHION_PHONE_ID = "1045539971979577"
 GROCERY_PHONE_ID = "1120135307844620"
@@ -377,11 +382,11 @@ def webhook():
                         elif phone_id == GROCERY_PHONE_ID:
                             handle_grocery(phone_id, from_number, text_body)
 
-                    # Customer sent an image (likely payment screenshot)
+                    # Customer sent an image — could be payment screenshot OR grocery list
                     if msg_type == "image" and phone_id == GROCERY_PHONE_ID:
                         media_id = message.get("image", {}).get("id", "")
                         if media_id:
-                            handle_payment_screenshot(phone_id, from_number, media_id)
+                            handle_customer_image(phone_id, from_number, media_id)
 
     except Exception as e:
         print(f"Error: {e}")
@@ -564,8 +569,22 @@ def handle_payment_screenshot(phone_id: str, from_number: str, media_id: str):
     PENDING_BY_CUSTOMER.pop(from_number, None)
 
 
+def _record_paid_order(pending: dict, paid_amount: float):
+    """Append a confirmed order to today's log for the daily summary."""
+    ORDERS_TODAY.append({
+        "order_id": pending["order_id"],
+        "amount": paid_amount,
+        "customer_phone": pending["customer_phone"],
+        "summary": pending.get("summary", ""),
+        "is_pickup": pending.get("is_pickup", False),
+        "schedule": pending.get("schedule", ""),
+        "ts": datetime.utcnow().isoformat(),
+    })
+
+
 def notify_paid_order(pending: dict, paid_amount: float, utr: str, payee: str, source: str):
     """Send paid-confirmation to customer + manager. Used by Razorpay webhook AND screenshot OCR."""
+    _record_paid_order(pending, paid_amount)
     # Customer
     send_message(pending["phone_id"], pending["customer_phone"],
         f"✅ *Payment Confirmed* — ₹{paid_amount:.0f} received 🎉\n"
@@ -1196,6 +1215,218 @@ def refresh_token_endpoint():
         "old_days_left": round(days_left, 1),
         "redeploy": "triggered",
     })
+
+
+# ─── DAILY ORDER SUMMARY ───────────────────────────
+@app.route("/daily-summary", methods=["GET"])
+def daily_summary_endpoint():
+    """Sends a daily order-summary WhatsApp to the manager.
+    Idempotent — runs at most once per day. Window: 21:00-23:59 IST.
+    Set up an UptimeRobot monitor pinging this every hour with the secret query.
+    """
+    global LAST_SUMMARY_DATE
+    if not REFRESH_SECRET or request.args.get("secret") != REFRESH_SECRET:
+        return jsonify({"error": "forbidden"}), 403
+
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    today = now_ist.strftime("%Y-%m-%d")
+
+    if LAST_SUMMARY_DATE == today:
+        return jsonify({"status": "skip", "reason": "already sent today"})
+    if not (21 <= now_ist.hour <= 23):
+        return jsonify({"status": "skip", "reason": "outside 21:00-23:59 IST window"})
+
+    if not ORDERS_TODAY:
+        msg = (
+            f"📊 *4U Grocery — Daily Summary*\n"
+            f"📅 {now_ist.strftime('%d %b %Y')}\n\n"
+            f"Aaj koi paid order nahi aaya 😔\n\n"
+            f"📞 Help: 9729119167"
+        )
+    else:
+        total = sum(o["amount"] for o in ORDERS_TODAY)
+        n = len(ORDERS_TODAY)
+        delivery_n = sum(1 for o in ORDERS_TODAY if not o["is_pickup"])
+        pickup_n = n - delivery_n
+        avg = total / n if n else 0
+
+        msg = (
+            f"📊 *4U Grocery — Daily Summary*\n"
+            f"📅 {now_ist.strftime('%d %b %Y')}\n\n"
+            f"🛒 *Total orders:* {n}\n"
+            f"💰 *Total revenue:* ₹{total:.0f}\n"
+            f"📈 *Average order:* ₹{avg:.0f}\n"
+            f"🚚 Delivery: {delivery_n} | 🏪 Pickup: {pickup_n}\n\n"
+            f"*Today's orders:*\n"
+        )
+        for o in ORDERS_TODAY[-10:]:
+            mode = "🏪" if o["is_pickup"] else "🚚"
+            msg += f"• {o['order_id']} — ₹{o['amount']:.0f} {mode}\n"
+        if n > 10:
+            msg += f"... +{n-10} more\n"
+        msg += f"\nDhanyavaad! 🙏"
+
+    send_message(GROCERY_PHONE_ID, GROCERY_MANAGER_NUMBER, msg)
+    LAST_SUMMARY_DATE = today
+    ORDERS_TODAY.clear()
+    return jsonify({"status": "sent", "date": today})
+
+
+# ─── PHOTO GROCERY LIST OCR ────────────────────────
+def analyze_customer_image(image_bytes: bytes) -> dict:
+    """Single Gemini Vision call: classify image AND extract data.
+    Returns: {"type": "payment_screenshot"|"grocery_list"|"other", ...fields}
+    """
+    if not GEMINI_API_KEY:
+        return {"type": "other"}
+    img_b64 = base64.b64encode(image_bytes).decode()
+    prompt = (
+        "Analyze this image. Decide which type it is and extract data:\n"
+        "1. payment_screenshot — Indian UPI payment success screen (Paytm/GPay/PhonePe/etc.)\n"
+        "2. grocery_list — handwritten or printed list of grocery items\n"
+        "3. other — neither\n\n"
+        "Return JSON only with this schema:\n"
+        '{"type":"payment_screenshot"|"grocery_list"|"other",'
+        '"amount":number,"utr":"","payee_upi_id":"","payee_name":"","looks_valid":bool,'
+        '"items":[{"name":"","qty":number}]}'
+    )
+    payload = {
+        "contents": [{"parts": [
+            {"text": prompt},
+            {"inlineData": {"mimeType": "image/jpeg", "data": img_b64}},
+        ]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.1,
+        },
+    }
+    try:
+        r = requests.post(f"{GEMINI_URL}?key={GEMINI_API_KEY}", json=payload, timeout=25)
+        r.raise_for_status()
+        text_out = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(text_out)
+    except Exception as e:
+        print(f"Vision OCR error: {e}")
+        return {"type": "other"}
+
+
+def handle_grocery_list_photo(phone_id: str, from_number: str, items: list):
+    """Customer sent a handwritten/printed grocery list — match items to catalog and propose cart."""
+    if not items:
+        send_message(phone_id, from_number,
+            "Photo dikhi 📸 lekin items clear nahi padhe ja rahe.\n"
+            "Type karke list bhej dijiye please 🙏"
+        )
+        return
+
+    matched = []
+    not_found = []
+    subtotal = 0.0
+    for it in items[:20]:  # cap at 20 items
+        name = (it.get("name") or "").strip()
+        qty = int(it.get("qty") or 1) or 1
+        if not name:
+            continue
+        results = search_catalog(name, limit=3)
+        in_stock = [r for r in results if r["stock"] > 0]
+        if in_stock:
+            best = in_stock[0]
+            line_total = best["price"] * qty
+            subtotal += line_total
+            matched.append({"name": best["name"], "qty": qty,
+                            "price": best["price"], "total": line_total,
+                            "mrp": best["mrp"]})
+        else:
+            not_found.append(f"{name} × {qty}")
+
+    if not matched:
+        send_message(phone_id, from_number,
+            "Photo me jo items hain woh humare paas abhi available nahi hain 😔\n"
+            "Aap manually order kar dijiye:\n📞 9729119167"
+        )
+        return
+
+    # Build cart preview message
+    lines = ["🛒 *Aapki list ke items:*\n"]
+    for m in matched:
+        disc = round((m["mrp"] - m["price"]) / m["mrp"] * 100) if m["mrp"] > 0 else 0
+        disc_str = f" ({disc}% OFF)" if disc > 0 else ""
+        lines.append(f"• {m['name']} × {m['qty']} = ₹{m['total']:.0f}{disc_str}")
+
+    lines.append(f"\n*Subtotal: ₹{subtotal:.0f}*")
+    if subtotal < 200:
+        delivery = 40
+    elif subtotal < 400:
+        delivery = 30
+    elif subtotal < 500:
+        delivery = 20
+    else:
+        delivery = 0
+    if delivery > 0:
+        lines.append(f"🚚 Delivery: ₹{delivery}")
+    else:
+        lines.append("🚚 Delivery: *FREE* 🎉")
+    lines.append(f"💰 *Total: ₹{subtotal + delivery:.0f}*")
+
+    if not_found:
+        lines.append(f"\n⚠️ Ye items nahi mile humare paas:")
+        for nf in not_found[:10]:
+            lines.append(f"• {nf}")
+
+    lines.append("\nOrder confirm karne ke liye apna *naam + Narnaul address* bhejiye 🙏")
+
+    send_message(phone_id, from_number, "\n".join(lines))
+
+    # Seed conversation context for AI (so when customer sends address, AI knows the items)
+    history = GROCERY_HISTORY[from_number]
+    cart_text = ", ".join(f"{m['name']} ×{m['qty']}" for m in matched)
+    history.append({"role": "user", "parts": [{"text": f"[Photo list] {cart_text}"}]})
+    history.append({"role": "model", "parts": [{"text": "\n".join(lines)}]})
+
+
+def handle_customer_image(phone_id: str, from_number: str, media_id: str):
+    """Image arrived — classify (payment screenshot vs grocery list) and route."""
+    img = fetch_whatsapp_media(media_id)
+    if not img:
+        return  # silent fail
+
+    parsed = analyze_customer_image(img)
+    img_type = parsed.get("type", "other")
+
+    if img_type == "grocery_list":
+        handle_grocery_list_photo(phone_id, from_number, parsed.get("items") or [])
+        return
+
+    if img_type == "payment_screenshot":
+        # Existing payment-screenshot flow inline
+        pending = PENDING_BY_CUSTOMER.get(from_number)
+        if not pending:
+            print(f"Payment screenshot from {from_number} but no pending order; ignoring")
+            return
+        if not parsed.get("looks_valid"):
+            send_message(phone_id, from_number,
+                f"📋 Order *{pending['order_id']}* — payment screenshot clearly nahi dikh raha 🙏\n"
+                "Razorpay link se pay kariye, auto-confirm ho jayega 😊"
+            )
+            return
+        paid = float(parsed.get("amount") or 0)
+        expected = pending["amount"]
+        if paid + 1 < expected:
+            send_message(phone_id, from_number,
+                f"📋 Order *{pending['order_id']}*\n\n"
+                f"Aapne ₹{paid:.0f} bheja, lekin total ₹{expected:.0f}.\n"
+                f"Please ₹{expected - paid:.0f} aur bhejein 🙏"
+            )
+            return
+        notify_paid_order(pending, paid_amount=paid,
+                          utr=parsed.get("utr") or "—",
+                          payee=parsed.get("payee_upi_id") or parsed.get("payee_name") or "—",
+                          source="Screenshot")
+        PENDING_BY_CUSTOMER.pop(from_number, None)
+        return
+
+    # other → silently ignore
+    print(f"Image from {from_number} not classified (type={img_type})")
 
 
 # ─── HEALTH CHECK ──────────────────────────────────

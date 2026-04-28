@@ -418,6 +418,27 @@ def webhook():
                         if media_id:
                             handle_customer_image(phone_id, from_number, media_id)
 
+                    # Voice / audio message → ask to type
+                    if msg_type in ("audio", "voice") and phone_id == GROCERY_PHONE_ID:
+                        send_message(phone_id, from_number,
+                            "Voice message support abhi nahi hai 🙏\n\n"
+                            "Please apna order *type* karke bhejiye —\n"
+                            "Item naam + quantity + address.\n\n"
+                            "📞 Help: 9729119167"
+                        )
+
+                    # Location pin → ask to type address
+                    if msg_type == "location" and phone_id == GROCERY_PHONE_ID:
+                        send_message(phone_id, from_number,
+                            "📍 Location mil gayi, lekin delivery ke liye humein "
+                            "*written address* chahiye 🙏\n\n"
+                            "Please type karke bhejiye:\n"
+                            "▪️ Aapka *naam*\n"
+                            "▪️ House / shop number\n"
+                            "▪️ Mohalla / ward / landmark\n"
+                            "▪️ Pincode (Narnaul)"
+                        )
+
     except Exception as e:
         print(f"Error: {e}")
 
@@ -429,7 +450,28 @@ GROCERY_SYSTEM_PROMPT = """You are the WhatsApp order-taking assistant for *4U G
 Store hours: 9 AM-9 PM. Delivery: only within Narnaul 10km area, 30-40 min. Help: 9729119167.
 
 DELIVERY CHARGES: <₹200=₹40, ₹200-399=₹30, ₹400-499=₹20, ≥₹500=FREE.
-PAYMENT: Razorpay link only (UPI/Card/Wallet). No COD.
+PAYMENT: Razorpay link only (UPI/Card/Wallet). No COD. Razorpay enforces exact amount — never accept under-payment, never confirm partial.
+
+# QUANTITY DISAMBIGUATION (CRITICAL)
+If customer's quantity is ambiguous, ASK before confirming:
+- "5 atta" → ask: "5 *kg* atta ya 5 *packets* atta?"
+- "2 dal" → ask: "2 kg ya 2 packets?"
+- "1 oil" → ask: "1 litre ya 1 packet?"
+Always nail down unit (kg / litre / packet / piece) before treating as final order.
+
+# LARGE ORDERS (> ₹5,000 or > 10 packets of same item)
+Don't auto-process. Reply:
+"Itna bada order phone par confirm karna better hoga. Please call: *9729119167*. Manager aapse details lekar special rate dega 🙏"
+
+# SCHEDULED ORDERS (out-of-hours: before 9 AM or after 9 PM IST)
+- Customer can still place order — set schedule_text to "Tomorrow 9-10 AM" or whatever they prefer
+- Acknowledge: "Hum abhi closed hain, aapka order kal subah 9 baje se deliver kar denge ✅"
+
+# DEVANAGARI / PURE HINDI
+If customer types in Hindi script (देवनागरी), reply in same Hindi script (Devanagari) instead of Roman Hinglish. Keep brand names in original case.
+
+# CANCELLATION POLICY
+After payment, orders CANNOT be cancelled. If customer asks to cancel, redirect to manager (9729119167) and mention exchange option at store.
 
 GREETING (first message only) — use this exact format:
 🛒 *4U Grocery* — Welcome!
@@ -898,16 +940,25 @@ ai_grocery_reply = groq_grocery_reply
 
 _SEP = "─" * 26
 
-FAST_WELCOME = (
-    "🛒 *4U Grocery* — Welcome!\n"
-    f"{_SEP}\n"
-    "🕘 *Hours:* 9 AM – 9 PM\n"
-    "⏱️ *Delivery:* 30-40 min\n"
-    "📍 *Area:* Narnaul (10 km radius)\n"
-    "💳 *Payment:* UPI / Card / Wallet\n"
-    f"{_SEP}\n\n"
-    "Bataiye, aaj kya chahiye? 😊"
-)
+def _fast_welcome():
+    """Welcome message with optional festive banner."""
+    banner = festive_banner()
+    banner_line = f"\n{banner}\n" if banner else "\n"
+    return (
+        "🛒 *4U Grocery* — Welcome!\n"
+        f"{_SEP}\n"
+        "🕘 *Hours:* 9 AM – 9 PM\n"
+        "⏱️ *Delivery:* 30-40 min\n"
+        "📍 *Area:* Narnaul (10 km radius)\n"
+        "💳 *Payment:* UPI / Card / Wallet\n"
+        f"{_SEP}"
+        f"{banner_line}\n"
+        "Bataiye, aaj kya chahiye? 😊"
+    )
+
+
+# Backwards-compat alias (used in canned reply path)
+FAST_WELCOME = _fast_welcome()
 FAST_HELP = (
     "📞 *4U Grocery — Customer Help*\n"
     f"{_SEP}\n"
@@ -1062,7 +1113,7 @@ def fast_canned_reply(text: str, history) -> str | None:
                  "namaskar", "ram ram", "good morning", "good evening",
                  "good afternoon", "gm", "ge", "start"}
     if is_first_msg and msg in GREETINGS:
-        return FAST_WELCOME
+        return _fast_welcome()  # always rebuild to pick up current festive banner
 
     # Thanks
     if msg in {"thanks", "thank you", "thx", "ty", "shukriya", "dhanyavaad",
@@ -1116,23 +1167,124 @@ def _is_spamming(from_number: str) -> bool:
     return len(timestamps) > 8
 
 
+CANCEL_TRIGGERS = ("cancel", "cancle", "cancell", "rad kar do", "hata do",
+                    "nahi karna", "order cancel", "remove order")
+
+
+def is_cancel_request(text: str) -> bool:
+    msg = (text or "").lower().strip()
+    return any(t in msg for t in CANCEL_TRIGGERS)
+
+
+def is_devanagari(text: str) -> bool:
+    """Customer typed in Hindi script (Devanagari)."""
+    return any('\u0900' <= ch <= '\u097F' for ch in (text or ""))
+
+
+def festive_banner() -> str:
+    """Return a festival/season banner if applicable (or empty string)."""
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    md = (now_ist.month, now_ist.day)
+    # Approximate festival windows (adjust dates yearly as needed)
+    festivals = [
+        ((1, 14), (1, 15), "🪁 *Makar Sankranti special* — extra discounts on dry fruits!"),
+        ((3, 5), (3, 15), "🎨 *Holi special* — colors, sweets, namkeen all stocked!"),
+        ((4, 1), (4, 15), "🌾 *Baisakhi offers* — atta + ghee combo deals!"),
+        ((8, 10), (8, 16), "🇮🇳 *Independence Day offers* — flag combo packs!"),
+        ((10, 15), (11, 15), "🪔 *Diwali special* — sweets, dry fruits, pooja samagri ready!"),
+        ((12, 20), (12, 31), "🎄 *Year-end offers* — stock up for celebrations!"),
+    ]
+    for (m1, d1), (m2, d2), msg in festivals:
+        if (m1, d1) <= md <= (m2, d2):
+            return msg
+    return ""
+
+
+def handle_cancel_request(phone_id: str, from_number: str):
+    sep = "─" * 26
+    send_message(phone_id, from_number,
+        f"🚫 *Order Cancellation*\n{sep}\n"
+        f"Sorry ji, online order cancel nahi kar sakte 🙏\n\n"
+        f"*Exchange option:* Order receive ke baad agar problem hai, "
+        f"store par aake exchange kar sakte hain.\n\n"
+        f"📞 *For help:* 9729119167\n"
+        f"_Manager se direct baat kar lijiye._"
+    )
+
+
+def handle_track_order(phone_id: str, from_number: str, order_id: str):
+    """Customer typed an order ID like 4UG-1234 — show status."""
+    sep = "─" * 26
+    today = next((o for o in ORDERS_TODAY if o["order_id"].upper() == order_id.upper()), None)
+    if not today:
+        send_message(phone_id, from_number,
+            f"📋 *Order {order_id}*\n{sep}\n"
+            f"Aapka order details abhi system me nahi mile.\n\n"
+            f"Direct manager se confirm karne ke liye:\n"
+            f"📞 9729119167"
+        )
+        return
+    # Compute mins since order
+    try:
+        ordered_at = datetime.fromisoformat(today["ts"])
+    except Exception:
+        ordered_at = datetime.utcnow()
+    mins_ago = (datetime.utcnow() - ordered_at).total_seconds() / 60
+    if mins_ago > 40:
+        send_message(phone_id, from_number,
+            f"📋 *Order {order_id}*\n{sep}\n"
+            f"⏱️ Order kuch der pehle dispatch ho gaya tha — delivery delay ho rahi hai 🙏\n\n"
+            f"📞 Please call manager: *9729119167*"
+        )
+    else:
+        remaining = max(0, int(40 - mins_ago))
+        send_message(phone_id, from_number,
+            f"📋 *Order {order_id}*\n{sep}\n"
+            f"✅ Pack ho raha hai\n"
+            f"🚚 Delivery: ~*{remaining} min* me\n\n"
+            f"📞 Help: 9729119167"
+        )
+
+
+ORDER_ID_RE = re.compile(r"\b4UG[\s-]?(\d{3,5})\b", re.IGNORECASE)
+
+
+def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> bool:
+    """Handle cancel / track / Devanagari before entering normal flow.
+    Returns True if handled (skip normal flow)."""
+    if is_cancel_request(text):
+        handle_cancel_request(phone_id, from_number)
+        return True
+    m = ORDER_ID_RE.search(text or "")
+    if m:
+        order_id = f"4UG-{m.group(1)}"
+        handle_track_order(phone_id, from_number, order_id)
+        return True
+    return False
+
+
 def handle_grocery(phone_id, from_number, text):
     history = GROCERY_HISTORY[from_number]
 
-    # ⏰ OUT OF HOURS — 9 PM to 9 AM IST: auto-reply with closed message (once per 30 min)
+    # 🚫 CANCEL / 📋 ORDER TRACKING — handled instantly
+    if maybe_handle_special_intent(phone_id, from_number, text):
+        return
+
+    # ⏰ OUT OF HOURS — show closed banner + ALLOW scheduled orders for next-day window
     if _is_out_of_hours():
         last = LAST_OUT_OF_HOURS_NOTIFY.get(from_number, 0)
-        if time.time() - last > 1800:  # 30 min cooldown per customer
+        if time.time() - last > 1800:
             sep = "─" * 26
             send_message(phone_id, from_number,
-                f"🌙 *4U Grocery — Closed*\n{sep}\n"
+                f"🌙 *4U Grocery — Closed Now*\n{sep}\n"
                 f"Hum abhi band hain 🙏\n"
-                f"🕘 Store hours: *9 AM – 9 PM*\n\n"
-                f"Aapka message note kar liya — kal subah 9 baje ke baad reply mil jayega.\n\n"
+                f"🕘 Open: *9 AM – 9 PM*\n\n"
+                f"Aap apna order *abhi place* kar sakte hain — hum kal subah 9 baje "
+                f"se delivery start kar denge.\n\n"
                 f"📞 Urgent: 9729119167"
             )
             LAST_OUT_OF_HOURS_NOTIFY[from_number] = time.time()
-        return  # don't process orders out of hours
+        # Continue processing — customer can still place a scheduled order
 
     # 🚫 SPAM PROTECTION — same customer >8 messages in 30 sec
     if _is_spamming(from_number):

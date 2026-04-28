@@ -1251,6 +1251,9 @@ PENDING_CARTS = {}  # phone -> {ts, last_msg, items_so_far} — for abandonment 
 
 CUSTOMER_NAMES = {}  # phone -> name (session memory)
 
+# Phones where bot is silenced — manager has takeover, all msgs forwarded to manager
+SILENCED_CUSTOMERS = set()
+
 
 def _log_activity(phone: str, msg: str, bot_reply: str):
     """Keep rolling log of last 200 customer interactions for manager drill-down."""
@@ -1433,6 +1436,58 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
     if from_number == GROCERY_MANAGER_NUMBER.lstrip("9").lstrip("1") or \
        from_number == GROCERY_MANAGER_NUMBER:
 
+        # /reply <phone> <message> — manager replies directly to a customer through bot
+        if msg.startswith("/reply"):
+            parts = (text or "").split(maxsplit=2)
+            if len(parts) >= 3:
+                target = parts[1].lstrip("+").lstrip("0")
+                if not target.startswith("91") and len(target) == 10:
+                    target = "91" + target
+                manager_msg = parts[2]
+                send_message(phone_id, target,
+                    f"👤 *Manager (4U Grocery):*\n{manager_msg}\n\n"
+                    f"_Aapki query manager ne personally answer ki hai._"
+                )
+                send_message(phone_id, from_number,
+                    f"✅ Sent to +{target}:\n_{manager_msg[:80]}_"
+                )
+            else:
+                send_message(phone_id, from_number,
+                    "Usage: `/reply 9876543210 Aapka order taiyaar hai`"
+                )
+            return True
+
+        # /silence <phone> — pause bot auto-reply for this customer; relay msgs to manager
+        if msg.startswith("/silence") or msg.startswith("/takeover"):
+            parts = msg.split()
+            if len(parts) >= 2:
+                target = parts[1].lstrip("+").lstrip("0")
+                if not target.startswith("91") and len(target) == 10:
+                    target = "91" + target
+                SILENCED_CUSTOMERS.add(target)
+                send_message(phone_id, from_number,
+                    f"🤐 Bot silenced for +{target}\n"
+                    f"_Aab unke saare messages aapko forward honge._\n"
+                    f"_Reply karne ke liye: `/reply {target} <message>`_\n"
+                    f"_Bot wapas chalu karne ke liye: `/resume {target}`_"
+                )
+            else:
+                send_message(phone_id, from_number, "Usage: `/silence 9876543210`")
+            return True
+
+        # /resume <phone> — bot takes over again
+        if msg.startswith("/resume"):
+            parts = msg.split()
+            if len(parts) >= 2:
+                target = parts[1].lstrip("+").lstrip("0")
+                if not target.startswith("91") and len(target) == 10:
+                    target = "91" + target
+                SILENCED_CUSTOMERS.discard(target)
+                send_message(phone_id, from_number,
+                    f"🤖 Bot resumed for +{target}"
+                )
+            return True
+
         # /last <phone> — show recent chat with that customer
         if msg.startswith("/last"):
             parts = msg.split()
@@ -1514,14 +1569,20 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
 
         if msg in ("/help", "/admin", "/?"):
             send_message(phone_id, from_number,
-                "🛠️ *Manager admin commands:*\n"
+                "🛠️ *Manager Admin Commands*\n\n"
+                "*📊 Reports*\n"
                 "▪️ `/orders` — today's count + revenue\n"
                 "▪️ `/customers` — today's customers list\n"
-                "▪️ `/last <phone>` — recent chat with that customer\n"
-                "▪️ `/pending` — carts started but unpaid\n"
                 "▪️ `/issues` — unsolved customer queries\n"
                 "▪️ `/missing` — items asked for but not in catalog\n"
-                "▪️ `/deals` — top discount items"
+                "▪️ `/pending` — carts started but unpaid\n"
+                "▪️ `/deals` — top discount items\n\n"
+                "*💬 Customer relay (talk through bot)*\n"
+                "▪️ `/last <phone>` — recent chat with that customer\n"
+                "▪️ `/reply <phone> <msg>` — send message to customer\n"
+                "▪️ `/silence <phone>` — pause bot, relay all msgs to you\n"
+                "▪️ `/resume <phone>` — bot takes over again\n\n"
+                "*Example:* `/reply 9876543210 Aapka order taiyaar hai`"
             )
             return True
 
@@ -1714,6 +1775,15 @@ def handle_grocery(phone_id, from_number, text):
     # 🚫 CANCEL / 📋 ORDER TRACKING / admin commands — handled instantly
     if maybe_handle_special_intent(phone_id, from_number, text):
         _log_activity(from_number, text, "[admin/intent command]")
+        return
+
+    # 🤐 MANAGER TAKEOVER — bot silenced for this customer; relay everything to manager
+    if from_number in SILENCED_CUSTOMERS:
+        send_message(phone_id, GROCERY_MANAGER_NUMBER,
+            f"💬 *From +{from_number}:*\n{text[:300]}\n\n"
+            f"_Reply: `/reply {from_number} <message>`_"
+        )
+        _log_activity(from_number, text, "[silenced — relayed to manager]")
         return
 
     # Track this customer as having an active conversation (cart-in-progress)

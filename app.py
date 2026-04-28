@@ -471,7 +471,7 @@ OUTPUT: Return ONLY a JSON object:
   "order_summary": "if complete: clean text with name/items/totals/address (else empty)",
   "total_amount": number (subtotal + delivery_charge by tier above; 0 if pickup or not complete),
   "delivery_or_pickup": "delivery"|"pickup"|"",
-  "schedule_text": "ASAP"|specific time|""
+  "schedule_text": "Now"|specific time|""
 }
 
 NEVER: invent prices, mention store address ("Hero Honda Chowk"), offer COD, say yaar/tu, write paragraphs, push customer to finalize."""
@@ -852,7 +852,7 @@ def groq_grocery_reply(from_number, text):
         '  "order_summary": "string (empty if not complete)",\n'
         '  "total_amount": number (0 if not complete),\n'
         '  "delivery_or_pickup": "delivery"|"pickup"|"",\n'
-        '  "schedule_text": "ASAP|specific time|empty"\n'
+        '  "schedule_text": "Now|specific time|empty"\n'
         '}\n'
     )
     system_text = GROCERY_SYSTEM_PROMPT + "\n\n" + catalog_block + schema_hint
@@ -1135,7 +1135,7 @@ def handle_grocery(phone_id, from_number, text):
 
     order_id = generate_order_id()
     is_pickup = result["delivery_or_pickup"] == "pickup"
-    schedule = result["schedule_text"] or "ASAP"
+    schedule = result["schedule_text"] or "Now"
     amount = result["total_amount"]
 
     # ── Try Razorpay payment link first (for delivery, where UPI is mandatory) ──

@@ -1568,7 +1568,7 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
                 send_message(phone_id, from_number, "\n".join(lines))
             return True
 
-        if msg in ("/help", "/admin", "/?"):
+        if msg in ("/admin", "/?"):
             send_message(phone_id, from_number,
                 "🛠️ *Manager Admin Commands*\n\n"
                 "*📊 Reports*\n"

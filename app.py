@@ -554,12 +554,8 @@ NEVER: invent prices, mention store address ("Hero Honda Chowk"), offer COD, say
 GROCERY_HISTORY = defaultdict(lambda: deque(maxlen=8))
 
 def _build_catalog_context(query: str) -> str:
-    """Search catalog and format matches as a system context block.
-
-    Token budget: keep under ~600 tokens (~2400 chars) so total Groq input stays
-    within free-tier limits.
-    """
-    matches = search_catalog(query, limit=8)
+    """Search catalog and format matches as a system context block."""
+    matches = search_catalog(query, limit=20)
     if not matches:
         return "# CATALOG MATCHES\n(no matches — say item not available)"
     lines = "\n".join(format_item_for_ai(m) for m in matches)
@@ -1033,15 +1029,16 @@ FAST_THANKS = "Welcome ji 🙏\n\nAur kuch chahiye to bataiye, hum yahan hain! �
 
 
 def _format_catalog_reply(matches: list, query: str) -> str:
-    """Build a brand-grouped catalog reply WITHOUT calling AI. Used for simple item lookups.
-    Professional theme — no-discount items show plain MRP, big deals get 🔥 tag."""
+    """Build a brand-grouped catalog reply WITHOUT calling AI. Shows full
+    available range (up to 35 items) so customer sees every option upfront.
+    Splits into multiple WhatsApp messages if needed (4096 char limit)."""
     in_stock = [m for m in matches if m["stock"] > 0]
     if not in_stock:
         return None
 
     # Group by first word of name (usually brand)
     by_brand = {}
-    for m in in_stock[:12]:
+    for m in in_stock[:35]:
         first = m["name"].split()[0]
         by_brand.setdefault(first, []).append(m)
 
@@ -1094,7 +1091,7 @@ def _instant_item_lookup(text: str, history) -> str | None:
     if not cat:
         return None
 
-    matches = search_catalog(text, limit=12)
+    matches = search_catalog(text, limit=35)
     in_stock = [m for m in matches if m["stock"] > 0]
     if not in_stock:
         return None

@@ -1029,18 +1029,32 @@ FAST_THANKS = "Welcome ji 🙏\n\nAur kuch chahiye to bataiye, hum yahan hain! �
 
 
 def _format_catalog_reply(matches: list, query: str) -> str:
-    """Build a brand-grouped catalog reply WITHOUT calling AI. Shows full
-    available range (up to 35 items) so customer sees every option upfront.
-    Splits into multiple WhatsApp messages if needed (4096 char limit)."""
+    """Brand-grouped catalog reply. Shows top 30 items diversified across brands.
+    If more items exist, hints to type a brand name for full lineup."""
     in_stock = [m for m in matches if m["stock"] > 0]
     if not in_stock:
         return None
 
-    # Group by first word of name (usually brand)
-    by_brand = {}
-    for m in in_stock[:35]:
+    # Group ALL in-stock matches by first word (brand)
+    full_by_brand = {}
+    for m in in_stock:
         first = m["name"].split()[0]
-        by_brand.setdefault(first, []).append(m)
+        full_by_brand.setdefault(first, []).append(m)
+
+    total_items = len(in_stock)
+
+    # Show up to 30 items diversified across brands (max ~5 per brand)
+    by_brand = {}
+    shown = 0
+    for brand, items in full_by_brand.items():
+        if shown >= 30:
+            break
+        per_brand_cap = max(3, min(5, 30 // max(1, len(full_by_brand))))
+        slice_items = items[:per_brand_cap]
+        by_brand[brand] = slice_items
+        shown += len(slice_items)
+
+    truncated = total_items > shown
 
     lines = [f"🛒 *{query.title()} — Available Options*", "─" * 26]
     for brand, items in by_brand.items():
@@ -1049,9 +1063,23 @@ def _format_catalog_reply(matches: list, query: str) -> str:
             label = " ".join(it["name"].split()[1:]) or it["name"]
             lines.append(f"   • {label}")
             lines.append(f"      {format_price_label(it)}")
+
     lines.append("")
     lines.append("─" * 26)
+
+    if truncated:
+        # Suggest typing a specific brand to see its full lineup
+        sample_brands = list(full_by_brand.keys())[:4]
+        brand_hint = " / ".join(f"_{b}_" for b in sample_brands)
+        lines.append(
+            f"📌 *{total_items}+ items* available — kisi specific brand ki "
+            f"poori list dekhne ke liye brand name type karein:"
+        )
+        lines.append(f"   👉 {brand_hint}")
+        lines.append("")
+
     lines.append("Kaunsa *brand* aur *kitne packets* chahiye? 😊")
+    lines.append("Ya *kuch specific* chahiye toh bataiye — humare paas aur bhi options hain!")
     return "\n".join(lines)
 
 
@@ -1086,16 +1114,27 @@ def _instant_item_lookup(text: str, history) -> str | None:
     if len(history) >= 4:
         return None
 
-    # MUST have a recognised category — prevents random substring matches
     cat = _detect_category(text)
-    if not cat:
-        return None
+    if cat:
+        matches = search_catalog(text, limit=80)
+        in_stock = [m for m in matches if m["stock"] > 0]
+        if not in_stock:
+            return None
+        return _format_catalog_reply(matches, text.strip())
 
-    matches = search_catalog(text, limit=35)
-    in_stock = [m for m in matches if m["stock"] > 0]
-    if not in_stock:
-        return None
-    return _format_catalog_reply(matches, text.strip())
+    # No category detected — check if it's a BRAND query
+    # (e.g. "Cadbury", "Amul", "Vadilal" — common when customer drills into a specific brand)
+    if word_count <= 2:
+        matches = search_catalog(text, limit=80)
+        in_stock = [m for m in matches if m["stock"] > 0]
+        if len(in_stock) >= 5:
+            # If most matches share the first token with the query → brand query
+            first_word = msg.split()[0]
+            brand_hits = [m for m in in_stock if m["name"].split()[0].lower() == first_word]
+            if len(brand_hits) >= 5:
+                return _format_catalog_reply(brand_hits, text.strip())
+
+    return None
 
 
 # Response cache for repeated AI queries — saves AI tokens dramatically

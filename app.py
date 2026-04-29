@@ -1734,12 +1734,7 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
 
     if _matches_any(msg, COMPLAINT_TRIGGERS):
         send_message(phone_id, from_number,
-            f"🙏 Sorry for inconvenience. Manager handle karenge.\n📞 9729119167"
-        )
-        SILENCED_CUSTOMERS.add(from_number)
-        send_message(phone_id, GROCERY_MANAGER_NUMBER,
-            f"🛟 *Complaint* +{from_number}\n"
-            f"\"{text[:120]}\"\n`/reply {from_number} <msg>`"
+            f"🙏 Sorry. Manager se baat karein:\n📞 9729119167"
         )
         return True
 

@@ -503,7 +503,7 @@ VISUAL STYLE (clean, one line per item):
 - Each item on ONE line:  Item Name — *₹Price* ~₹MRP~ X%OFF
 - Use Title Case for item names, not ALL CAPS
 - End with: "Kaunsa brand aur kitna chahiye?"
-  Then: "Kuch specific product chahiye toh bataiye! 😊"
+  Then: "Humare paas aur bhi products hain — kuch specific chahiye toh bataiye! 😊"
 
 DELIVERY CHARGE SAVING NUDGE (show ONLY in order summary, NOT in catalog):
 When showing order total with delivery charge, check if customer is close to next cheaper tier:
@@ -1098,7 +1098,7 @@ def _format_catalog_reply(matches: list, query: str) -> str:
         lines.append("")
 
     lines.append("Kaunsa brand aur kitna chahiye?")
-    lines.append("Kuch specific product chahiye toh bataiye! 😊")
+    lines.append("Humare paas aur bhi products hain — kuch specific chahiye toh bataiye! 😊")
     return "\n".join(lines)
 
 

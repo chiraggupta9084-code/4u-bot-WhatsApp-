@@ -367,17 +367,16 @@ def search_catalog_raw(query: str, limit: int = 30):
 
 
 def format_price_label(item: dict) -> str:
-    """Format price professionally: no-discount = direct MRP only, else strikethrough.
-    Highlights >=50% discounts with 🔥 BIG DEAL tag."""
+    """Short price tag: our price first (bold), then MRP struck if discounted."""
     mrp = item.get("mrp", 0) or 0
     price = item.get("price", 0) or 0
     if mrp <= 0 or abs(mrp - price) < 1:
         return f"*₹{price:.0f}*"
     discount = round((mrp - price) / mrp * 100)
     if discount >= 50:
-        return f"~₹{mrp:.0f}~ *₹{price:.0f}* 🔥 *{discount}% OFF*"
+        return f"*₹{price:.0f}* ~₹{mrp:.0f}~ 🔥{discount}%OFF"
     elif discount > 0:
-        return f"~₹{mrp:.0f}~ *₹{price:.0f}* ({discount}% OFF)"
+        return f"*₹{price:.0f}* ~₹{mrp:.0f}~ {discount}%OFF"
     return f"*₹{price:.0f}*"
 
 

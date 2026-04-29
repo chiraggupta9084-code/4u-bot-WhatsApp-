@@ -423,7 +423,7 @@ def webhook():
                         send_message(phone_id, from_number,
                             "Voice message support abhi nahi hai 🙏\n\n"
                             "Please apna order *type* karke bhejiye —\n"
-                            "Item naam + quantity + address.\n\n"
+                            "Item naam + quantity bhejiye.\n\n"
                             "📞 Help: 9729119167"
                         )
 
@@ -433,10 +433,11 @@ def webhook():
                             "📍 Location mil gayi, lekin delivery ke liye humein "
                             "*written address* chahiye 🙏\n\n"
                             "Please type karke bhejiye:\n"
-                            "▪️ Aapka *naam*\n"
-                            "▪️ House / shop number\n"
-                            "▪️ Mohalla / ward / landmark\n"
-                            "▪️ Pincode (Narnaul)"
+                            "▪️ *Naam*\n"
+                            "▪️ *Ghar/Shop no.*\n"
+                            "▪️ *Mohalla/Ward*\n"
+                            "▪️ *Landmark* (paas me kya hai)\n"
+                            "▪️ *Phone no.* (agar alag ho)"
                         )
 
     except Exception as e:
@@ -466,7 +467,7 @@ Don't auto-process. Reply:
 # SCHEDULED ORDERS (out-of-hours: before 9 AM or after 9 PM IST)
 - Customer can still place order BUT delivery cannot be "Now" — store is closed.
 - Bot's job: BEFORE confirming the order, ASK the customer when they want delivery within store hours (9 AM – 9 PM):
-  "Aap kab delivery chahte hain? (e.g. *kal 10 AM*, *kal 12 PM*, *5 PM*)"
+  "Shop subah 9 baje khulegi. Aap kis time delivery chahte hain? (e.g. *10 AM*, *12 PM*, *3 PM*)"
 - Use the customer's reply as `schedule_text`. Don't assume — always ask.
 - Acknowledge once schedule is set: "✅ Order schedule ho gaya: [time]. Hum aapka order us time pe deliver kar denge."
 
@@ -489,24 +490,44 @@ Bataiye, aaj kya chahiye? 😊
 
 CATALOG: A `# CATALOG MATCHES` section shows top items. ONLY quote catalog prices, never invent.
 
-PRICE FORMAT (professional theme):
-- If item has discount (MRP > price): `~₹MRP~ *₹PRICE* (X% OFF)`
-- If discount ≥ 50%: `~₹MRP~ *₹PRICE* 🔥 *X% OFF*` — highlight big deals
-- If NO discount (MRP equals price OR catalog notes "NO DISCOUNT"): just `*₹PRICE*` — no strikethrough, no fake percentage
+PRICE FORMAT:
+- Our price FIRST (bold), then MRP strikethrough: `*₹PRICE* ~₹MRP~ X%OFF`
+- If discount ≥ 50%: `*₹PRICE* ~₹MRP~ 🔥X%OFF`
+- If NO discount: just `*₹PRICE*` — no strikethrough, no percentage
 
 Out-of-stock items: skip, suggest in-stock alternatives. Generic query (butter/milk/atta) → list ALL matching brands grouped. Specific query (amul butter 500g) → just that item.
 
-VISUAL STYLE for replies (professional):
-- Use heading line: 🛒 *Topic* — Available Options
-- Separator: ─────────── between sections
-- Brand groups marked with ▪️
-- Items with • bullet, indented
-- ALWAYS end with: "Kaunsa *brand* aur *kitne packets* chahiye? 😊"
-  (always ask both brand AND quantity — never just one)
+VISUAL STYLE (clean, one line per item):
+- Heading: 🛒 *Topic*
+- Brand group: ▪️ *Brand Name*
+- Each item on ONE line:  Item Name — *₹Price* ~₹MRP~ X%OFF
+- Use Title Case for item names, not ALL CAPS
+- End with: "Kaunsa brand aur kitna chahiye?"
+  Then: "Aur bhi bohot products hain — kuch aur chahiye toh bataiye! 😊"
 
-UPSELL: If subtotal close to next delivery tier (₹100-199, ₹300-399, ₹400-499), nudge once: "Add ₹X more for cheaper/free delivery."
+DELIVERY CHARGE SAVING NUDGE (show ONLY in order summary, NOT in catalog):
+When showing order total with delivery charge, check if customer is close to next cheaper tier:
+- Subtotal ₹150-199 (paying ₹40) → "Sirf ₹X aur add karein toh delivery ₹30 ho jayegi!"
+- Subtotal ₹350-399 (paying ₹30) → "Sirf ₹X aur add karein toh delivery ₹20 ho jayegi!"
+- Subtotal ₹450-499 (paying ₹20) → "Sirf ₹X aur add karein toh delivery *FREE* ho jayegi! 🎉"
+Show this AFTER the total line. Only nudge once per order. Be specific with the ₹ amount needed.
 
-ADDRESS: Always remind "Delivery sirf Narnaul 10km area me. Naam, house/shop, mohalla/ward, landmark, pincode bhejein." If outside Narnaul (Mahendragarh/Rewari/Delhi/etc., or pincode ≠ 123001 area) → refuse delivery, offer pickup.
+ORDER CONFIRMATION FLOW:
+When customer says "bas itna hi" / "ho gaya" / confirms items:
+- Show order summary with subtotal + delivery charge
+- Ask: "*Delivery* ya *Pickup*?"
+- If DELIVERY → ask address in this format:
+  "Delivery ke liye ye details bhejein 📍
+  ▪️ *Naam*
+  ▪️ *Ghar/Shop no.*
+  ▪️ *Mohalla/Ward*
+  ▪️ *Landmark* (paas me kya hai)
+  ▪️ *Phone no.* (agar alag ho)"
+- If PICKUP → ask: "Pickup ke liye *time* confirm kijiye ⏰ (Shop: 9 AM – 9 PM)"
+- Only mark order_complete=true AFTER full address (delivery) or time (pickup) is confirmed
+- If customer gives incomplete address (e.g. just mohalla, no name) → politely ask missing fields
+
+ADDRESS: Delivery sirf Narnaul 10km area me. If outside Narnaul (Mahendragarh/Rewari/Delhi/etc., or pincode ≠ 123001 area) → refuse delivery, offer pickup.
 
 ORDER COMPLETE = all 3 present: (1) item+qty from catalog, (2) delivery name+Narnaul address OR pickup time, (3) customer indicated done.
 
@@ -767,7 +788,7 @@ def handle_repeat_order(phone_id: str, from_number: str):
         f"{summary}\n\n"
         f"💰 Last total: ₹{amount:.0f}\n\n"
         f"_Wahi items dobara order karne ke liye:_\n"
-        f"✅ Apna *naam + Narnaul address* bhejiye, hum repeat order set kar denge\n\n"
+        f"✅ *Delivery* ya *Pickup*? Bataiye!\n\n"
         f"_Ya kuch alag chahiye to seedha bata dijiye_ 😊\n"
         f"📞 Help: 9729119167"
     )
@@ -778,7 +799,7 @@ def handle_repeat_order(phone_id: str, from_number: str):
     history.append({"role": "user", "parts": [{"text": "[Repeat order request]"}]})
     history.append({"role": "model", "parts": [{"text":
         f"Customer wants to repeat their previous order: {summary} (₹{amount:.0f}). "
-        f"Wait for them to share name + address, then complete the order with these items."
+        f"Wait for them to choose delivery or pickup. If delivery, ask full address (naam, ghar/shop no, mohalla/ward, landmark, phone). If pickup, ask time."
     }]})
 
 
@@ -983,8 +1004,7 @@ def _fast_welcome():
         "💳 *Payment:* UPI / Card / Wallet\n"
         f"{_SEP}"
         f"{banner_line}\n"
-        "Bataiye, aaj kya chahiye? 😊\n"
-        "_(`menu` ya `deals` type karein for quick options)_"
+        "Bataiye, aaj kya chahiye? 😊"
     )
 
 
@@ -1063,30 +1083,22 @@ def _format_catalog_reply(matches: list, query: str) -> str:
 
     truncated = total_items > shown
 
-    lines = [f"🛒 *{query.title()} — Available Options*", "─" * 26]
+    lines = [f"🛒 *{query.title()}*\n"]
     for brand, items in by_brand.items():
-        lines.append(f"\n▪️ *{brand}*")
+        lines.append(f"▪️ *{brand.title()}*")
         for it in items:
             label = " ".join(it["name"].split()[1:]) or it["name"]
-            lines.append(f"   • {label}")
-            lines.append(f"      {format_price_label(it)}")
-
-    lines.append("")
-    lines.append("─" * 26)
-
-    if truncated:
-        # Suggest typing a specific brand to see its full lineup
-        sample_brands = list(full_by_brand.keys())[:4]
-        brand_hint = " / ".join(f"_{b}_" for b in sample_brands)
-        lines.append(
-            f"📌 *{total_items}+ items* available — kisi specific brand ki "
-            f"poori list dekhne ke liye brand name type karein:"
-        )
-        lines.append(f"   👉 {brand_hint}")
+            lines.append(f"  {label.title()} — {format_price_label(it)}")
         lines.append("")
 
-    lines.append("Kaunsa *brand* aur *kitne packets* chahiye? 😊")
-    lines.append("Ya *kuch specific* chahiye toh bataiye — humare paas aur bhi options hain!")
+    if truncated:
+        sample_brands = list(full_by_brand.keys())[:4]
+        brand_hint = " / ".join(b.title() for b in sample_brands)
+        lines.append(f"_{total_items}+ items hain — brand type karein: {brand_hint}_")
+        lines.append("")
+
+    lines.append("Kaunsa brand aur kitna chahiye?")
+    lines.append("Aur bhi bohot products hain — kuch aur chahiye toh bataiye! 😊")
     return "\n".join(lines)
 
 
@@ -1792,13 +1804,12 @@ def handle_grocery(phone_id, from_number, text):
             send_message(phone_id, from_number,
                 f"🌙 *4U Grocery — Closed Now*\n{sep}\n"
                 f"Hum abhi band hain 🙏\n"
-                f"🕘 Open: *9 AM – 9 PM*\n"
+                f"🕘 Shop *subah 9 baje* khulegi\n"
                 f"{sep}\n\n"
-                f"📅 *Kal ke liye order schedule kar sakte hain!*\n\n"
+                f"Aap abhi order place kar sakte hain — hum subah deliver kar denge!\n\n"
                 f"Bataiye:\n"
                 f"▪️ Kya items chahiye?\n"
-                f"▪️ Kal *kis time* delivery chahiye? (e.g. 10 AM, 12 PM, 3 PM)\n\n"
-                f"Hum aapka order kal us time pe deliver kar denge ✅\n\n"
+                f"▪️ *Kis time* delivery chahiye? (e.g. 10 AM, 12 PM, 3 PM)\n\n"
                 f"📞 Urgent: 9729119167"
             )
             LAST_OUT_OF_HOURS_NOTIFY[from_number] = time.time()
@@ -2372,11 +2383,11 @@ def handle_grocery_list_photo(phone_id: str, from_number: str, items: list):
         for nf in not_found[:10]:
             lines.append(f"• {nf}")
 
-    lines.append("\nOrder confirm karne ke liye apna *naam + Narnaul address* bhejiye 🙏")
+    lines.append(f"\n*Delivery* ya *Pickup*? Bataiye! 😊")
 
     send_message(phone_id, from_number, "\n".join(lines))
 
-    # Seed conversation context for AI (so when customer sends address, AI knows the items)
+    # Seed conversation context for AI (so when customer chooses delivery/pickup, AI knows the items)
     history = GROCERY_HISTORY[from_number]
     cart_text = ", ".join(f"{m['name']} ×{m['qty']}" for m in matched)
     history.append({"role": "user", "parts": [{"text": f"[Photo list] {cart_text}"}]})

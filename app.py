@@ -547,8 +547,28 @@ NEVER: invent prices, mention store address ("Hero Honda Chowk"), offer COD, say
 You MUST understand all forms of Hindi, Hinglish, broken Hindi, shortforms, typos, and slang. Customers type casually — treat their message as a REAL conversation, not a search query.
 
 GENERAL QUERIES (customer asking what you have / browsing):
-- "kya h apke paas" / "kya hai" / "kya milega" / "kya kya hai" / "sab dikhao" / "kya available h" / "aapke paas kya kya h" / "bta do kya h" → Show CATEGORIES list (dairy, grains, snacks, drinks, etc.) and ask "Kaunsi category chahiye?"
-- "aur kya h" / "aur dikhao" / "aur options" / "or kuch" → Show more categories or ask what type they want
+When customer asks "kya h" / "kya milega" / "kya kya hai" / "sab dikhao" / "kya available h" / "bta do kya h" / "kahne me kya h" / "kya bechte ho" → Show this EXACT category list:
+
+🛒 *4U Grocery — Categories*
+🥛 *Dairy:* milk, butter, ghee, paneer, dahi, cheese
+🌾 *Grains:* atta, rice, dal, besan, maida
+🌶️ *Masala:* haldi, mirch, jeera, garam masala
+🧂 *Salt/Sugar:* namak, cheeni, gud, honey
+🛢️ *Oil:* refined, mustard, sunflower
+🍪 *Snacks:* biscuit, namkeen, chips, popcorn
+🍫 *Sweets:* chocolate, ice cream, candy
+🥤 *Drinks:* juice, cold drink, tea, coffee
+🍞 *Bakery:* bread, bun, cake
+🧼 *Personal Care:* soap, shampoo, toothpaste
+🧹 *Cleaning:* detergent, harpic, lizol
+👶 *Baby:* diaper, baby food, wipes
+🪔 *Pooja:* agarbatti, dhoop, kapoor
+📚 *Other:* stationery, hygiene, toy
+
+Then ask: "Kaunsi category chahiye? Item name type karein! 😊"
+
+- "kahne me kya h" / "kuch khane ka" / "snacks" → Show food categories (dairy, grains, snacks, sweets, bakery, drinks)
+- "aur kya h" / "aur dikhao" / "aur options" → Show more categories or ask what type they want
 - NEVER say "ye item available nahi hai" for general browsing questions!
 
 COMMON SHORTFORMS & TYPOS — always understand:
@@ -1023,20 +1043,22 @@ _SEP = "─" * 26
 def _fast_welcome():
     """Welcome with time-based greeting + optional festive banner."""
     banner = festive_banner()
-    banner_line = f"\n{banner}\n" if banner else "\n"
     greeting = _greeting_by_time()
-    return (
-        f"{greeting}\n"
-        "🛒 *4U Grocery* — Welcome!\n"
-        f"{_SEP}\n"
-        "🕘 *Hours:* 9 AM – 9 PM\n"
-        "⏱️ *Delivery:* 30-40 min\n"
-        "📍 *Area:* Narnaul (10 km radius)\n"
-        "💳 *Payment:* UPI / Card / Wallet\n"
-        f"{_SEP}"
-        f"{banner_line}\n"
-        "Bataiye, aaj kya chahiye? 😊"
-    )
+    lines = [
+        f"{greeting}",
+        f"🛒 *4U Grocery* — Welcome!",
+        _SEP,
+        "🕘 *Hours:* 9 AM – 9 PM",
+        "⏱️ *Delivery:* 30-40 min",
+        "📍 *Area:* Narnaul (10 km radius)",
+        "💳 *Payment:* UPI / Card / Wallet",
+        _SEP,
+    ]
+    if banner:
+        lines.append(banner)
+    lines.append("")
+    lines.append("Bataiye, aaj kya chahiye? 😊")
+    return "\n".join(lines)
 
 
 # Don't call _fast_welcome() at module load — festive_banner is defined later.

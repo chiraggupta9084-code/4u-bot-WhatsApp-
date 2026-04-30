@@ -1191,13 +1191,11 @@ def fast_canned_reply(text: str, history) -> str | None:
     if not msg or len(msg) > 60:
         return None  # let AI handle longer / non-trivial messages
 
-    is_first_msg = len(history) <= 1  # only the just-appended user msg
-
-    # Greetings — only on first message of a fresh conversation
+    # Greetings — always show welcome (customer may say hi anytime)
     GREETINGS = {"hi", "hii", "hiii", "hello", "hey", "hlo", "namaste",
                  "namaskar", "ram ram", "good morning", "good evening",
                  "good afternoon", "gm", "ge", "start"}
-    if is_first_msg and msg in GREETINGS:
+    if msg in GREETINGS:
         return _fast_welcome()  # always rebuild to pick up current festive banner
 
     # Thanks
@@ -1627,7 +1625,11 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
         return True
 
     # ── MENU / CATEGORIES COMMAND ──
-    if msg in ("menu", "menus", "/menu", "list", "categories", "items list", "kya kya hai"):
+    if msg in ("menu", "menus", "/menu", "list", "categories", "items list", "kya kya hai",
+                "kya h apke paas", "kya hai apke paas", "kya hai aapke paas",
+                "kya h aapke paas", "kya milega", "kya milta hai", "sab dikhao",
+                "kya available hai", "kya hai", "kya h", "saman dikhao",
+                "items dikhao", "products dikhao", "all items"):
         send_message(phone_id, from_number,
             f"🛒 *4U Grocery — Categories*\n{sep}\n"
             f"🥛 *Dairy:* milk, butter, ghee, paneer, dahi, cheese\n"
@@ -1660,13 +1662,12 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
                 f"Item type karein, hum normal best price dikha denge!"
             )
         else:
-            lines = [f"🔥 *Today's Best Deals*", sep]
+            lines = [f"🔥 *Today's Best Deals*\n"]
             for o in offers:
                 d = round((o["mrp"] - o["price"]) / o["mrp"] * 100)
-                lines.append(f"• {o['name']}")
-                lines.append(f"   ~₹{o['mrp']:.0f}~ *₹{o['price']:.0f}* ({d}% OFF)")
-            lines.append(sep)
-            lines.append("Order karne ke liye item ka naam aur quantity bhejein! 😊")
+                tag = f"🔥{d}%OFF" if d >= 50 else f"{d}%OFF"
+                lines.append(f"• {o['name'].title()} — *₹{o['price']:.0f}* ~₹{o['mrp']:.0f}~ {tag}")
+            lines.append(f"\nKuch chahiye toh item ka naam aur quantity bhejein! 😊")
             send_message(phone_id, from_number, "\n".join(lines))
         return True
 
@@ -2360,8 +2361,13 @@ def handle_grocery_list_photo(phone_id: str, from_number: str, items: list):
     lines = ["🛒 *Aapki list ke items:*\n"]
     for m in matched:
         disc = round((m["mrp"] - m["price"]) / m["mrp"] * 100) if m["mrp"] > 0 else 0
-        disc_str = f" ({disc}% OFF)" if disc > 0 else ""
-        lines.append(f"• {m['name']} × {m['qty']} = ₹{m['total']:.0f}{disc_str}")
+        if disc >= 50:
+            price_str = f"*₹{m['price']:.0f}* ~₹{m['mrp']:.0f}~ 🔥{disc}%OFF"
+        elif disc > 0:
+            price_str = f"*₹{m['price']:.0f}* ~₹{m['mrp']:.0f}~ {disc}%OFF"
+        else:
+            price_str = f"*₹{m['price']:.0f}*"
+        lines.append(f"• {m['name'].title()} × {m['qty']} — {price_str}")
 
     lines.append(f"\n*Subtotal: ₹{subtotal:.0f}*")
     if subtotal < 200:

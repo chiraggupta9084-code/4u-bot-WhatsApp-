@@ -724,47 +724,6 @@ def ocr_payment_screenshot(image_bytes: bytes) -> dict:
         return {"looks_valid": False}
 
 
-def handle_payment_screenshot(phone_id: str, from_number: str, media_id: str):
-    """Customer sent an image. Try to read it as payment proof."""
-    pending = PENDING_BY_CUSTOMER.get(from_number)
-    if not pending:
-        # Stay quiet — don't bother customer if they shared an unrelated image
-        print(f"Image from {from_number} but no pending order; ignoring")
-        return
-
-    img = fetch_whatsapp_media(media_id)
-    if not img:
-        # Silent fail — don't surface to customer. Manager check happens on Razorpay anyway.
-        print(f"Could not fetch media {media_id} for {from_number}; staying silent")
-        return
-
-    parsed = ocr_payment_screenshot(img)
-    if not parsed.get("looks_valid"):
-        send_message(phone_id, from_number,
-            f"📋 Order *{pending['order_id']}* — payment screenshot clearly nahi dikh raha 🙏\n"
-            "Please ek clean screenshot bhejein jisme amount aur UTR/transaction ID dono visible ho.\n\n"
-            "Ya phir Razorpay link se pay kariye, auto-confirm ho jayega 😊"
-        )
-        return
-
-    paid = float(parsed.get("amount") or 0)
-    expected = pending["amount"]
-    utr = parsed.get("utr") or "—"
-    payee = parsed.get("payee_upi_id") or parsed.get("payee_name") or "—"
-
-    if paid + 1 < expected:  # ₹1 tolerance
-        send_message(phone_id, from_number,
-            f"📋 Order *{pending['order_id']}*\n\n"
-            f"Aapne ₹{paid:.0f} bheja hai, lekin order ka total ₹{expected:.0f} hai.\n"
-            f"Please ₹{expected - paid:.0f} aur bhejein, phir confirm hoga 🙏"
-        )
-        return
-
-    # Looks good — confirm
-    notify_paid_order(pending, paid_amount=paid, utr=utr, payee=payee, source="Screenshot")
-    PENDING_BY_CUSTOMER.pop(from_number, None)
-
-
 def _record_paid_order(pending: dict, paid_amount: float):
     """Append a confirmed order to today's log AND update customer history."""
     ORDERS_TODAY.append({
@@ -1047,6 +1006,11 @@ ai_grocery_reply = groq_grocery_reply
 
 _SEP = "─" * 26
 
+# Single source of truth for greeting words — used in canned reply, silence bypass, history clear
+GREETING_WORDS = {"hi", "hii", "hiii", "hello", "hey", "hlo", "namaste",
+                  "namaskar", "ram ram", "start", "good morning", "good evening",
+                  "good afternoon", "gm", "ge"}
+
 def _fast_welcome():
     """Welcome with time-based greeting + optional festive banner."""
     banner = festive_banner()
@@ -1258,10 +1222,7 @@ def fast_canned_reply(text: str, history) -> str | None:
         return None  # let AI handle longer / non-trivial messages
 
     # Greetings — always show welcome (customer may say hi anytime)
-    GREETINGS = {"hi", "hii", "hiii", "hello", "hey", "hlo", "namaste",
-                 "namaskar", "ram ram", "good morning", "good evening",
-                 "good afternoon", "gm", "ge", "start"}
-    if msg in GREETINGS:
+    if msg in GREETING_WORDS:
         return _fast_welcome()  # always rebuild to pick up current festive banner
 
     # Thanks
@@ -1897,21 +1858,21 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
 def handle_grocery(phone_id, from_number, text):
     history = GROCERY_HISTORY[from_number]
 
-    # 🚫 CANCEL / 📋 ORDER TRACKING / admin commands — handled instantly
-    if maybe_handle_special_intent(phone_id, from_number, text):
-        _log_activity(from_number, text, "[admin/intent command]")
-        return
-
     # 🤐 MANAGER TAKEOVER — bot silenced for this customer; relay everything to manager
     # But let greetings break through silence (customer wants to start fresh)
-    _greeting_words = {"hi", "hii", "hiii", "hello", "hey", "hlo", "namaste",
-                       "namaskar", "start", "good morning", "good evening", "gm", "ge"}
-    if _is_silenced(from_number) and (text or "").lower().strip() not in _greeting_words:
+    # Check silence BEFORE special intents so menu/deals/etc. don't fire when bot is silenced
+    # (Manager admin commands still work because manager number is never silenced)
+    if _is_silenced(from_number) and (text or "").lower().strip() not in GREETING_WORDS:
         send_message(phone_id, GROCERY_MANAGER_NUMBER,
             f"💬 *From +{from_number}:*\n{text[:300]}\n\n"
             f"_Reply: `/reply {from_number} <message>`_"
         )
         _log_activity(from_number, text, "[silenced — relayed to manager]")
+        return
+
+    # 🚫 CANCEL / 📋 ORDER TRACKING / admin commands — handled instantly
+    if maybe_handle_special_intent(phone_id, from_number, text):
+        _log_activity(from_number, text, "[admin/intent command]")
         return
 
     # Track this customer as having an active conversation (cart-in-progress)
@@ -1951,9 +1912,7 @@ def handle_grocery(phone_id, from_number, text):
     canned = fast_canned_reply(text, history)
     if canned is not None:
         # Clear old history on greeting so customer starts fresh
-        if (text or "").lower().strip() in {"hi", "hii", "hiii", "hello", "hey", "hlo",
-                                             "namaste", "namaskar", "ram ram", "start",
-                                             "good morning", "good evening", "good afternoon", "gm", "ge"}:
+        if (text or "").lower().strip() in GREETING_WORDS:
             history.clear()
             _unsilence_customer(from_number)  # also un-silence if they were silenced
         history.append({"role": "user", "parts": [{"text": text}]})
@@ -2486,13 +2445,7 @@ def handle_grocery_list_photo(phone_id: str, from_number: str, items: list):
     # Build cart preview message
     lines = ["🛒 *Aapki list ke items:*\n"]
     for m in matched:
-        disc = round((m["mrp"] - m["price"]) / m["mrp"] * 100) if m["mrp"] > 0 else 0
-        if disc >= 50:
-            price_str = f"*₹{m['price']:.0f}* ~₹{m['mrp']:.0f}~ 🔥{disc}%OFF"
-        elif disc > 0:
-            price_str = f"*₹{m['price']:.0f}* ~₹{m['mrp']:.0f}~ {disc}%OFF"
-        else:
-            price_str = f"*₹{m['price']:.0f}*"
+        price_str = format_price_label(m)
         lines.append(f"• {m['name'].title()} × {m['qty']} — {price_str}")
 
     lines.append(f"\n*Subtotal: ₹{subtotal:.0f}*")

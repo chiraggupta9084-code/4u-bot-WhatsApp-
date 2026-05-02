@@ -1186,10 +1186,11 @@ def _instant_item_lookup(text: str, history) -> str | None:
     word_count = len(msg.split())
     if word_count > 5:
         return None
-    order_signals = ["address", "house", "ward", "narnaul", "naam", "name",
-                     "mohalla", "near", "house no", "h.no", "sector", "colony",
-                     "gali", "wali", "nagar", "vihar", "huda", "chowk",
-                     "road", "ghar", "shop no", "landmark", "123"]
+    order_signals = ["address", "house no", "ward no", "narnaul", "naam mera",
+                     "mohalla", "near ", "h.no", "sector ", "colony",
+                     "gali ", "nagar", "vihar", "huda", "chowk",
+                     "ghar no", "shop no", "landmark", "123001",
+                     "deliver kar", "pickup kar"]
     if any(s in msg for s in order_signals):
         return None
     # Pincode pattern (6 digits) → address, not product
@@ -1327,7 +1328,27 @@ PENDING_CARTS = {}  # phone -> {ts, last_msg, items_so_far} — for abandonment 
 CUSTOMER_NAMES = {}  # phone -> name (session memory)
 
 # Phones where bot is silenced — manager has takeover, all msgs forwarded to manager
-SILENCED_CUSTOMERS = set()
+# Auto-expires after 30 min so customer isn't permanently locked out
+SILENCED_CUSTOMERS = {}  # phone -> timestamp when silenced
+
+
+def _is_silenced(phone: str) -> bool:
+    """Check if customer is silenced. Auto-expire after 30 min."""
+    ts = SILENCED_CUSTOMERS.get(phone)
+    if ts is None:
+        return False
+    if time.time() - ts > 1800:  # 30 min auto-expire
+        SILENCED_CUSTOMERS.pop(phone, None)
+        return False
+    return True
+
+
+def _silence_customer(phone: str):
+    SILENCED_CUSTOMERS[phone] = time.time()
+
+
+def _unsilence_customer(phone: str):
+    SILENCED_CUSTOMERS.pop(phone, None)
 
 
 def _log_activity(phone: str, msg: str, bot_reply: str):
@@ -1432,7 +1453,7 @@ def handle_cancel_request(phone_id: str, from_number: str):
         f"🚫 Online cancel nahi ho sakta.\n"
         f"Manager se baat karein:\n📞 9729119167"
     )
-    SILENCED_CUSTOMERS.add(from_number)
+    _silence_customer(from_number)
     send_message(phone_id, GROCERY_MANAGER_NUMBER,
         f"🚫 *Cancel request* +{from_number}\n`/reply {from_number} <msg>`"
     )
@@ -1538,7 +1559,7 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
                 target = parts[1].lstrip("+").lstrip("0")
                 if not target.startswith("91") and len(target) == 10:
                     target = "91" + target
-                SILENCED_CUSTOMERS.add(target)
+                _silence_customer(target)
                 send_message(phone_id, from_number,
                     f"👤 *Manager mode ON* for +{target}\n"
                     f"_Aab customer ke saare messages aapko forward honge._\n"
@@ -1556,7 +1577,7 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
                 target = parts[1].lstrip("+").lstrip("0")
                 if not target.startswith("91") and len(target) == 10:
                     target = "91" + target
-                SILENCED_CUSTOMERS.discard(target)
+                _unsilence_customer(target)
                 send_message(phone_id, from_number,
                     f"🤖 *Bot mode ON* for +{target}\n"
                     f"_Bot ne wapas customer handle karna start kar diya._"
@@ -1682,7 +1703,7 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
         send_message(phone_id, from_number,
             f"🙏 Manager aapse contact karenge.\n📞 9729119167"
         )
-        SILENCED_CUSTOMERS.add(from_number)
+        _silence_customer(from_number)
         send_message(phone_id, GROCERY_MANAGER_NUMBER,
             f"🛟 *Customer asked for manager*\n+{from_number}\n"
             f"`/reply {from_number} <message>`"
@@ -1822,7 +1843,7 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
         send_message(phone_id, from_number,
             f"🙏 Sorry ji. Manager turant aapse contact karenge.\n📞 9729119167"
         )
-        SILENCED_CUSTOMERS.add(from_number)
+        _silence_customer(from_number)
         log_failure(from_number, text, "unhappy customer", notify_manager=True)
         return True
 
@@ -1834,7 +1855,7 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
         send_message(phone_id, from_number,
             f"💰 Refund ke liye manager se baat karein:\n📞 9729119167"
         )
-        SILENCED_CUSTOMERS.add(from_number)
+        _silence_customer(from_number)
         send_message(phone_id, GROCERY_MANAGER_NUMBER,
             f"💰 *Refund request* +{from_number}\n"
             f"\"{text[:120]}\"\n`/reply {from_number} <msg>`"
@@ -1882,7 +1903,10 @@ def handle_grocery(phone_id, from_number, text):
         return
 
     # 🤐 MANAGER TAKEOVER — bot silenced for this customer; relay everything to manager
-    if from_number in SILENCED_CUSTOMERS:
+    # But let greetings break through silence (customer wants to start fresh)
+    _greeting_words = {"hi", "hii", "hiii", "hello", "hey", "hlo", "namaste",
+                       "namaskar", "start", "good morning", "good evening", "gm", "ge"}
+    if _is_silenced(from_number) and (text or "").lower().strip() not in _greeting_words:
         send_message(phone_id, GROCERY_MANAGER_NUMBER,
             f"💬 *From +{from_number}:*\n{text[:300]}\n\n"
             f"_Reply: `/reply {from_number} <message>`_"
@@ -1926,6 +1950,12 @@ def handle_grocery(phone_id, from_number, text):
     # 1️⃣ FASTEST PATH: trivial canned (greetings, hours, help) — no AI, no catalog search
     canned = fast_canned_reply(text, history)
     if canned is not None:
+        # Clear old history on greeting so customer starts fresh
+        if (text or "").lower().strip() in {"hi", "hii", "hiii", "hello", "hey", "hlo",
+                                             "namaste", "namaskar", "ram ram", "start",
+                                             "good morning", "good evening", "good afternoon", "gm", "ge"}:
+            history.clear()
+            _unsilence_customer(from_number)  # also un-silence if they were silenced
         history.append({"role": "user", "parts": [{"text": text}]})
         history.append({"role": "model", "parts": [{"text": canned}]})
         send_message(phone_id, from_number, canned)

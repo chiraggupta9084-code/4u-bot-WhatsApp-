@@ -543,6 +543,13 @@ OUTPUT: Return ONLY a JSON object:
 
 NEVER: invent prices, mention store address ("Hero Honda Chowk"), offer COD, say yaar/tu, write paragraphs, push customer to finalize.
 
+# ADDRESS DETECTION (CRITICAL)
+If customer sends something that looks like an ADDRESS (contains name + house/shop number, sector, colony, mohalla, ward, gali, nagar, pincode, landmark, chowk, huda, road), DO NOT show products. Instead:
+- Confirm the address: "✅ Address confirm: [name], [address details]"
+- If order items are already discussed → move to payment (set order_complete=true)
+- If no items discussed yet → ask "Kya order karna hai? Items batayein 😊"
+Signs of address: 6-digit pincode, "sector", "colony", "mohalla", "ward", "near", "gali", "house no", "h.no", "huda"
+
 # HINDI / HINGLISH UNDERSTANDING (CRITICAL)
 You MUST understand all forms of Hindi, Hinglish, broken Hindi, shortforms, typos, and slang. Customers type casually — treat their message as a REAL conversation, not a search query.
 
@@ -1180,8 +1187,13 @@ def _instant_item_lookup(text: str, history) -> str | None:
     if word_count > 5:
         return None
     order_signals = ["address", "house", "ward", "narnaul", "naam", "name",
-                     "mohalla", "near", "house no", "h.no"]
+                     "mohalla", "near", "house no", "h.no", "sector", "colony",
+                     "gali", "wali", "nagar", "vihar", "huda", "chowk",
+                     "road", "ghar", "shop no", "landmark", "123"]
     if any(s in msg for s in order_signals):
+        return None
+    # Pincode pattern (6 digits) → address, not product
+    if re.search(r'\b\d{6}\b', msg):
         return None
     if len(history) >= 4:
         return None
@@ -1677,14 +1689,26 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
         )
         return True
 
-    # ── MENU / CATEGORIES COMMAND ──
-    if msg in ("menu", "menus", "/menu", "list", "categories", "items list", "kya kya hai",
-                "kya h apke paas", "kya hai apke paas", "kya hai aapke paas",
-                "kya h aapke paas", "kya milega", "kya milta hai", "sab dikhao",
-                "kya available hai", "kya hai", "kya h", "saman dikhao",
-                "items dikhao", "products dikhao", "all items"):
+    # ── MENU / CATEGORIES — keyword-based, not exact match ──
+    MENU_EXACT = {"menu", "menus", "/menu", "list", "categories", "items list",
+                  "kya kya hai", "kya hai", "kya h", "sab dikhao", "all items"}
+    MENU_KEYWORDS = ("kya h apke", "kya hai apke", "kya hai aapke", "kya h aapke",
+                     "kya milega", "kya milta", "kya available", "kya bechte",
+                     "saman dikhao", "items dikhao", "products dikhao",
+                     "apke paas kya", "aapke paas kya", "paas kya kya",
+                     "kya kya milega", "bta do kya", "batao kya", "btao kya")
+
+    is_menu_query = msg in MENU_EXACT or any(k in msg for k in MENU_KEYWORDS)
+
+    # Detect food-specific browsing: "kahne me", "khane me", "kuch khane ka"
+    FOOD_KEYWORDS = ("kahne", "khane", "khana", "kuch khane", "meetha", "nashta",
+                     "breakfast", "snack", "snacks ka", "peene", "pine")
+    is_food_query = any(k in msg for k in FOOD_KEYWORDS) and any(
+        w in msg for w in ("kya", "h", "hai", "dikhao", "batao", "btao", "milega", "chahiye"))
+
+    if is_menu_query and not is_food_query:
         send_message(phone_id, from_number,
-            f"🛒 *4U Grocery — Categories*\n{sep}\n"
+            f"🛒 *4U Grocery — Sab Kuch Available!*\n{sep}\n"
             f"🥛 *Dairy:* milk, butter, ghee, paneer, dahi, cheese\n"
             f"🌾 *Grains:* atta, rice, dal, besan, maida\n"
             f"🌶️ *Masala:* haldi, mirch, jeera, garam masala\n"
@@ -1700,7 +1724,26 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
             f"🪔 *Pooja:* agarbatti, dhoop, kapoor\n"
             f"📚 *Other:* stationery, hygiene, toy\n"
             f"{sep}\n"
-            f"Bus item type karein, hum saari brands aur prices dikha denge! 😊"
+            f"Item type karein, hum brands aur prices dikha denge! 😊"
+        )
+        return True
+
+    if is_food_query:
+        send_message(phone_id, from_number,
+            f"🍽️ *Khane-Peene Ka Saman*\n{sep}\n"
+            f"🥛 *Dairy:* milk, butter, ghee, paneer, dahi, cheese\n"
+            f"🌾 *Grains:* atta, rice, dal, besan, maida\n"
+            f"🌶️ *Masala:* haldi, mirch, jeera, garam masala\n"
+            f"🧂 *Salt/Sugar:* namak, cheeni, gud, honey\n"
+            f"🛢️ *Oil:* refined, mustard, sunflower\n"
+            f"🍪 *Snacks:* biscuit, namkeen, chips, popcorn, makhana\n"
+            f"🍫 *Sweets:* chocolate, ice cream, candy\n"
+            f"🥤 *Drinks:* juice, cold drink, tea, coffee, lassi\n"
+            f"🍞 *Bakery:* bread, bun, cake\n"
+            f"🥚 *Eggs:* anda\n"
+            f"🍜 *Noodles:* maggi, pasta, vermicelli\n"
+            f"{sep}\n"
+            f"Kya khayenge? Item type karein! 😊"
         )
         return True
 

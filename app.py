@@ -414,31 +414,46 @@ def webhook():
 
                     # Customer sent an image — could be payment screenshot OR grocery list
                     if msg_type == "image" and phone_id == GROCERY_PHONE_ID:
-                        media_id = message.get("image", {}).get("id", "")
-                        if media_id:
-                            handle_customer_image(phone_id, from_number, media_id)
+                        if _is_silenced(from_number):
+                            send_message(phone_id, GROCERY_MANAGER_NUMBER,
+                                f"📷 *Image from +{from_number}* (silenced)\n"
+                                f"_Check directly — bot is in manager mode._")
+                        else:
+                            media_id = message.get("image", {}).get("id", "")
+                            if media_id:
+                                handle_customer_image(phone_id, from_number, media_id)
 
                     # Voice / audio message → ask to type
                     if msg_type in ("audio", "voice") and phone_id == GROCERY_PHONE_ID:
-                        send_message(phone_id, from_number,
-                            "Voice message support abhi nahi hai 🙏\n\n"
-                            "Please apna order *type* karke bhejiye —\n"
-                            "Item naam + quantity bhejiye.\n\n"
-                            "📞 Help: 9729119167"
-                        )
+                        if _is_silenced(from_number):
+                            send_message(phone_id, GROCERY_MANAGER_NUMBER,
+                                f"🎤 *Voice msg from +{from_number}* (silenced)\n"
+                                f"`/reply {from_number} <msg>`")
+                        else:
+                            send_message(phone_id, from_number,
+                                "Voice message support abhi nahi hai 🙏\n\n"
+                                "Please apna order *type* karke bhejiye —\n"
+                                "Item naam + quantity bhejiye.\n\n"
+                                "📞 Help: 9729119167"
+                            )
 
                     # Location pin → ask to type address
                     if msg_type == "location" and phone_id == GROCERY_PHONE_ID:
-                        send_message(phone_id, from_number,
-                            "📍 Location mil gayi, lekin delivery ke liye humein "
-                            "*written address* chahiye 🙏\n\n"
-                            "Please type karke bhejiye:\n"
-                            "▪️ *Naam*\n"
-                            "▪️ *Ghar/Shop no.*\n"
-                            "▪️ *Mohalla/Ward*\n"
-                            "▪️ *Landmark* (paas me kya hai)\n"
-                            "▪️ *Phone no.* (agar alag ho)"
-                        )
+                        if _is_silenced(from_number):
+                            send_message(phone_id, GROCERY_MANAGER_NUMBER,
+                                f"📍 *Location from +{from_number}* (silenced)\n"
+                                f"`/reply {from_number} <msg>`")
+                        else:
+                            send_message(phone_id, from_number,
+                                "📍 Location mil gayi, lekin delivery ke liye humein "
+                                "*written address* chahiye 🙏\n\n"
+                                "Please type karke bhejiye:\n"
+                                "▪️ *Naam*\n"
+                                "▪️ *Ghar/Shop no.*\n"
+                                "▪️ *Mohalla/Ward*\n"
+                                "▪️ *Landmark* (paas me kya hai)\n"
+                                "▪️ *Phone no.* (agar alag ho)"
+                            )
 
     except Exception as e:
         print(f"Error: {e}")
@@ -1012,9 +1027,11 @@ GREETING_WORDS = {"hi", "hii", "hiii", "hello", "hey", "hlo", "namaste",
                   "good afternoon", "gm", "ge"}
 
 def _fast_welcome():
-    """Welcome with time-based greeting + optional festive banner."""
+    """Welcome with time-based greeting + optional festive banner.
+    If out of hours, includes closed note so customer doesn't get double message."""
     banner = festive_banner()
     greeting = _greeting_by_time()
+    closed = _is_out_of_hours()
     lines = [
         f"{greeting}",
         f"🛒 *4U Grocery* — Welcome!",
@@ -1027,6 +1044,8 @@ def _fast_welcome():
     ]
     if banner:
         lines.append(banner)
+    if closed:
+        lines.append("🌙 _Hum abhi band hain — subah 9 baje se order deliver honge!_")
     lines.append("")
     lines.append("Bataiye, aaj kya chahiye? 😊")
     return "\n".join(lines)
@@ -1160,7 +1179,10 @@ def _instant_item_lookup(text: str, history) -> str | None:
     # Pincode pattern (6 digits) → address, not product
     if re.search(r'\b\d{6}\b', msg):
         return None
-    if len(history) >= 4:
+    # Skip catalog shortcut in deep conversations (AI should handle multi-turn ordering)
+    # Count only user messages (each turn = 2 entries: user + model)
+    user_turns = sum(1 for h in history if h.get("role") == "user")
+    if user_turns >= 3:
         return None
 
     cat = _detect_category(text)
@@ -1240,9 +1262,12 @@ def fast_canned_reply(text: str, history) -> str | None:
                "call karo", "call me"} or "phone number" in msg:
         return FAST_HELP
 
-    # Location / address
-    if any(k in msg for k in ["where are you", "kahan ho", "kahan", "location",
-                              "address kya", "shop kahan", "store kahan"]):
+    # Location / address — be specific so "cream kahan h" doesn't trigger
+    if msg in {"location", "kahan ho", "kahan ho tum", "shop kahan", "store kahan",
+               "dukan kahan", "address kya", "address kya hai", "shop address",
+               "store address", "dukan ka address"} or \
+       "where are you" in msg or "shop kahan" in msg or "store kahan" in msg or \
+       "dukan kahan" in msg:
         return FAST_LOCATION
 
     # Delivery charges
@@ -1742,9 +1767,7 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
         else:
             lines = [f"🔥 *Today's Best Deals*\n"]
             for o in offers:
-                d = round((o["mrp"] - o["price"]) / o["mrp"] * 100)
-                tag = f"🔥{d}%OFF" if d >= 50 else f"{d}%OFF"
-                lines.append(f"• {o['name'].title()} — *₹{o['price']:.0f}* ~₹{o['mrp']:.0f}~ {tag}")
+                lines.append(f"• {o['name'].title()} — {format_price_label(o)}")
             lines.append(f"\nKuch chahiye toh item ka naam aur quantity bhejein! 😊")
             send_message(phone_id, from_number, "\n".join(lines))
         return True
@@ -1879,7 +1902,9 @@ def handle_grocery(phone_id, from_number, text):
     _track_pending(from_number, text)
 
     # ⏰ OUT OF HOURS — show closed banner + ALLOW scheduled orders for next-day window
-    if _is_out_of_hours():
+    # Skip if customer just said hi/hello — welcome message is enough, avoid double message
+    _msg_lower = (text or "").lower().strip()
+    if _is_out_of_hours() and _msg_lower not in GREETING_WORDS:
         last = LAST_OUT_OF_HOURS_NOTIFY.get(from_number, 0)
         if time.time() - last > 1800:
             sep = "─" * 26

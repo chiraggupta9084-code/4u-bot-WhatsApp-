@@ -789,12 +789,15 @@ def check_loyalty_reward(phone: str):
 REPEAT_TRIGGERS = (
     "phir wahi", "wahi order", "same order", "same as last", "fir se",
     "phir se wahi", "repeat order", "wahi cheez", "wahi item",
+    "last order", "pichla order", "pichle wala", "dobara", "dubara",
+    "wahi sab", "same wala", "repeat karo", "repeat kr do",
+    "wahi bhejo", "same bhej do", "wo hi chahiye",
 )
 
 
 def is_repeat_request(text: str) -> bool:
     msg = (text or "").lower().strip()
-    if msg in {"same", "wahi", "repeat", "phir wahi", "fir se"}:
+    if msg in {"same", "wahi", "repeat", "phir wahi", "fir se", "dobara", "dubara"}:
         return True
     return any(t in msg for t in REPEAT_TRIGGERS)
 
@@ -1022,9 +1025,16 @@ ai_grocery_reply = groq_grocery_reply
 _SEP = "─" * 26
 
 # Single source of truth for greeting words — used in canned reply, silence bypass, history clear
-GREETING_WORDS = {"hi", "hii", "hiii", "hello", "hey", "hlo", "namaste",
-                  "namaskar", "ram ram", "start", "good morning", "good evening",
-                  "good afternoon", "gm", "ge"}
+# Single source of truth for greeting words — used in canned reply, silence bypass, history clear
+GREETING_WORDS = {
+    "hi", "hii", "hiii", "hello", "hey", "hlo", "helo",
+    "namaste", "namaskar", "ram ram", "jai shree ram", "jai shri ram",
+    "radhe radhe", "sat sri akal", "salaam", "salam",
+    "start", "shuru", "ok start",
+    "good morning", "good evening", "good afternoon", "good night",
+    "gm", "ge", "ga", "gn",
+    "suprabhat",
+}
 
 def _fast_welcome():
     """Welcome with time-based greeting + optional festive banner.
@@ -1154,26 +1164,36 @@ def _instant_item_lookup(text: str, history) -> str | None:
     # Skip noise / non-queries
     if len(msg) < 2 or len(msg) > 50:
         return None
-    if msg in {"ok", "okay", "yes", "no", "haan", "nahi", "thik", "ji",
-               "k", "kk", "okk", "thanks", "ty", "thx", "?", "??", "...",
-               "abc", "test", "hmm", "..", "."}:
+    if msg in {"ok", "okay", "yes", "no", "haan", "ha", "haa", "nahi", "nhi",
+               "nai", "na", "thik", "theek", "ji", "ji haan", "hnji", "accha",
+               "acha", "sahi", "bilkul", "zaroor", "sure", "done", "bas",
+               "k", "kk", "okk", "okkk", "thanks", "ty", "thx", "?", "??",
+               "...", "abc", "test", "hmm", "hm", "..", ".", "👍", "🙏",
+               "ok ji", "thik h", "theek h", "sahi h", "ho gaya", "hogaya",
+               "ban gaya", "mil gaya"}:
         return None
     # Pure punctuation/emoji
     if not any(c.isalnum() for c in msg):
         return None
     # Intent queries handled by AI (price/discount/track etc.)
-    if any(t in msg for t in ["rate kya", "price kya", "kitne ka", "discount", "offer kya",
-                              "track", "cancel", "complaint"]):
+    if any(t in msg for t in ["rate kya", "price kya", "kitne ka", "kitna hai",
+                              "kitne hai", "kya rate", "kya price", "kya dam",
+                              "discount", "offer kya", "track", "cancel",
+                              "complaint", "order status", "kab aayega",
+                              "kab milega order", "delivery kab"]):
         return None
 
     word_count = len(msg.split())
     if word_count > 5:
         return None
     order_signals = ["address", "house no", "ward no", "narnaul", "naam mera",
-                     "mohalla", "near ", "h.no", "sector ", "colony",
+                     "mohalla", "near ", "h.no", "h no", "sector ", "colony",
                      "gali ", "nagar", "vihar", "huda", "chowk",
                      "ghar no", "shop no", "landmark", "123001",
-                     "deliver kar", "pickup kar"]
+                     "deliver kar", "pickup kar", "delivery chahiye",
+                     "pickup chahiye", "ghar pe", "ghar par", "dukan pe",
+                     "flat no", "floor", "manzil", "block ", "plot ",
+                     "village", "gaon", "pin code", "pincode"]
     if any(s in msg for s in order_signals):
         return None
     # Pincode pattern (6 digits) → address, not product
@@ -1249,17 +1269,28 @@ def fast_canned_reply(text: str, history) -> str | None:
 
     # Thanks
     if msg in {"thanks", "thank you", "thx", "ty", "shukriya", "dhanyavaad",
-               "dhanyawad", "thnx", "thank u"}:
+               "dhanyawad", "thnx", "thank u", "thanku", "thankyou", "thanks ji",
+               "ok thanks", "ok thank you", "theek hai thanks", "thik h thanks",
+               "bahut shukriya", "bohot shukriya", "meherbani"}:
         return FAST_THANKS
 
     # Hours
-    if any(k in msg for k in ["timing", "hours", "kab khulta", "kab khulte",
-                              "kitne baje", "kab band", "open kab", "open ho"]):
+    if any(k in msg for k in ["timing", "timings", "time kya", "hours",
+                              "kab khulta", "kab khulte", "kab khulti",
+                              "kitne baje", "kab band", "band kab",
+                              "open kab", "open ho", "khula hai", "khula h",
+                              "khule ho", "band ho", "band hai", "band h",
+                              "abhi khula", "abhi band", "shop open",
+                              "store open", "dukan khuli", "dukan band"]):
         return FAST_HOURS
 
     # Help / contact / phone number
     if msg in {"help", "contact", "phone", "phone number", "number",
-               "call karo", "call me"} or "phone number" in msg:
+               "call karo", "call me", "helpline", "support", "madad",
+               "phone no", "phone number do", "number do", "no. do",
+               "contact number", "contact no", "phone batao",
+               "number batao", "call karo na", "mujhe call karo"} or \
+       "phone number" in msg or "contact number" in msg:
         return FAST_HELP
 
     # Location / address — be specific so "cream kahan h" doesn't trigger
@@ -1271,12 +1302,20 @@ def fast_canned_reply(text: str, history) -> str | None:
         return FAST_LOCATION
 
     # Delivery charges
-    if any(k in msg for k in ["delivery charge", "delivery fee",
-                              "delivery kitne", "kitna delivery", "shipping"]):
+    if any(k in msg for k in ["delivery charge", "delivery charges", "delivery fee",
+                              "delivery kitne", "kitna delivery", "shipping",
+                              "delivery ka charge", "delivery ka paisa",
+                              "delivery kitna lagega", "delivery free",
+                              "free delivery", "delivery cost",
+                              "kitna lagega delivery"]):
         return FAST_DELIVERY
 
     # Payment options
-    if msg in {"payment", "payment options", "pay", "pay kaise", "kaise pay"}:
+    if msg in {"payment", "payment options", "pay", "pay kaise", "kaise pay",
+               "payment kaise", "payment kaise kare", "payment kaise hoga",
+               "paisa kaise de", "paise kaise de", "upi", "upi id",
+               "cod", "cash on delivery", "cod available", "cod milega",
+               "online payment", "card se", "card payment"}:
         return FAST_PAYMENT
 
     return None
@@ -1302,8 +1341,12 @@ def _is_spamming(from_number: str) -> bool:
     return len(timestamps) > 8
 
 
-UNHAPPY_TRIGGERS = ("ghatiya", "bekar", "bakwas", "kharab service", "third class",
-                     "useless", "worst", "very bad service", "horrible", "ghatya")
+UNHAPPY_TRIGGERS = ("ghatiya", "ghatya", "bekar", "bakwas", "bekaar",
+                     "kharab service", "third class", "tatti", "ganda",
+                     "useless", "worst", "very bad", "very bad service",
+                     "horrible", "pathetic", "disgusting", "fraud",
+                     "dhoka", "dhokha", "cheat", "loot", "lutera",
+                     "chor", "pagal", "bewakoof")
 
 # Failure log — recorded for daily digest + immediate manager forward in serious cases
 FAILED_QUERIES = []  # list of dicts: {ts, customer, message, reason}
@@ -1388,17 +1431,32 @@ def log_failure(customer_phone: str, customer_msg: str, reason: str, notify_mana
         )
 
 
-CANCEL_TRIGGERS = ("cancel", "cancle", "cancell", "rad kar do", "hata do",
-                    "nahi karna", "order cancel", "remove order")
-REFUND_TRIGGERS = ("refund", "paisa wapas", "paise wapas", "return karna",
-                    "wapas chahiye", "money back")
-COMPLAINT_TRIGGERS = ("complaint", "shikayat", "galat saman", "kharab item",
-                      "wrong item", "damaged", "missing item", "kam saman",
-                      "not received", "nahi mila")
-RECEIPT_TRIGGERS = ("bill", "receipt", "invoice", "rasid", "gst bill")
+CANCEL_TRIGGERS = ("cancel", "cancle", "cancell", "cansel", "kensel",
+                    "rad kar do", "rad karo", "hata do", "hatao",
+                    "nahi karna", "nhi karna", "order cancel", "remove order",
+                    "order hata do", "mat bhejo", "nahi chahiye ab",
+                    "cancel karo", "cancel kr do", "cancel krdo")
+REFUND_TRIGGERS = ("refund", "refnd", "paisa wapas", "paise wapas",
+                    "return karna", "return krna", "wapas chahiye",
+                    "money back", "paise do wapas", "paisa de do",
+                    "paise lauta do", "refund karo", "refund kr do",
+                    "vapas karo", "vapas chahiye")
+COMPLAINT_TRIGGERS = ("complaint", "complain", "shikayat", "galat saman",
+                      "kharab item", "kharab saman", "galat item", "galat bheja",
+                      "wrong item", "wrong order", "damaged", "toota", "tuta",
+                      "missing item", "kam saman", "kam bheja", "kam aaya",
+                      "not received", "nahi mila", "nhi mila", "nhi aaya",
+                      "abhi tak nahi aaya", "order nahi aaya", "deliver nahi hua",
+                      "saman galat", "item galat", "kuch aur bhej diya")
+RECEIPT_TRIGGERS = ("bill", "receipt", "invoice", "rasid", "raseed",
+                    "gst bill", "gst invoice", "bill chahiye", "bill do",
+                    "bill bhejo", "receipt bhejo", "pakka bill")
 IDENTITY_TRIGGERS = ("are you human", "are you a person", "are you a bot",
-                     "real person", "tu kaun", "aap kaun", "bot ho",
-                     "human ho", "ai ho")
+                     "are you real", "real person", "tu kaun", "tu kaun h",
+                     "aap kaun", "aap kaun ho", "aap kaun h", "kaun ho tum",
+                     "bot ho", "bot ho kya", "bot h kya",
+                     "human ho", "human ho kya", "insaan ho",
+                     "ai ho", "ai ho kya", "robot ho", "machine ho")
 
 
 def _matches_any(msg: str, triggers) -> bool:
@@ -1683,8 +1741,12 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
 
     # ── EXPLICIT MANAGER ESCALATION — only when customer asks for human ──
     HUMAN_TRIGGERS = ("manager", "talk to human", "real person", "human se",
-                       "manager se baat", "manager chahiye", "real human",
-                       "live agent", "shopkeeper")
+                       "manager se baat", "manager chahiye", "manager bhejo",
+                       "real human", "live agent", "shopkeeper", "dukan wala",
+                       "dukan wale", "owner", "malik", "seth ji",
+                       "insaan se baat", "aadmi se baat", "kisi se baat",
+                       "call karo manager", "manager ko bhejo",
+                       "baat kara do", "connect karo")
     if any(t in msg for t in HUMAN_TRIGGERS) and len(msg) < 50:
         send_message(phone_id, from_number,
             f"🙏 Manager aapse contact karenge.\n📞 9729119167"
@@ -1698,20 +1760,29 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
 
     # ── MENU / CATEGORIES — keyword-based, not exact match ──
     MENU_EXACT = {"menu", "menus", "/menu", "list", "categories", "items list",
-                  "kya kya hai", "kya hai", "kya h", "sab dikhao", "all items"}
+                  "kya kya hai", "kya hai", "kya h", "sab dikhao", "all items",
+                  "sab batao", "saman", "samaan", "item list", "product list",
+                  "catalog", "catalogue", "price list"}
     MENU_KEYWORDS = ("kya h apke", "kya hai apke", "kya hai aapke", "kya h aapke",
                      "kya milega", "kya milta", "kya available", "kya bechte",
                      "saman dikhao", "items dikhao", "products dikhao",
                      "apke paas kya", "aapke paas kya", "paas kya kya",
-                     "kya kya milega", "bta do kya", "batao kya", "btao kya")
+                     "kya kya milega", "bta do kya", "batao kya", "btao kya",
+                     "apke yahan kya", "aapke yahan kya", "tumhare paas kya",
+                     "kya kya available", "kya kya milta", "sab kya milta",
+                     "sab kuch dikhao", "sabhi items", "sara saman",
+                     "kya rakhte ho", "kya bech rahe", "aapke pass kya")
 
     is_menu_query = msg in MENU_EXACT or any(k in msg for k in MENU_KEYWORDS)
 
     # Detect food-specific browsing: "kahne me", "khane me", "kuch khane ka"
     FOOD_KEYWORDS = ("kahne", "khane", "khana", "kuch khane", "meetha", "nashta",
-                     "breakfast", "snack", "snacks ka", "peene", "pine")
+                     "breakfast", "snack", "snacks ka", "peene", "pine",
+                     "kuch meetha", "mithai", "mithe", "namkeen ka",
+                     "tiffin", "lunch", "dinner", "kuch kha")
     is_food_query = any(k in msg for k in FOOD_KEYWORDS) and any(
-        w in msg for w in ("kya", "h", "hai", "dikhao", "batao", "btao", "milega", "chahiye"))
+        w in msg for w in ("kya", "h", "hai", "dikhao", "batao", "btao", "milega",
+                           "chahiye", "do", "dena", "de do", "bhejo", "becho"))
 
     if is_menu_query and not is_food_query:
         send_message(phone_id, from_number,
@@ -1756,7 +1827,10 @@ def maybe_handle_special_intent(phone_id: str, from_number: str, text: str) -> b
 
     # ── DEALS COMMAND ──
     if msg in ("deals", "deal", "offer", "offers", "discount", "today's deals", "best price",
-               "sasta", "cheap"):
+               "sasta", "cheap", "saste", "sasti", "sabse sasta", "best deal",
+               "best deals", "aaj ki deal", "aaj ke offer", "koi offer",
+               "koi deal", "discount hai", "discount h", "offer hai",
+               "offer h", "kuch sasta", "cheap wala"):
         offers = _today_top_offers(8)
         if not offers:
             send_message(phone_id, from_number,
